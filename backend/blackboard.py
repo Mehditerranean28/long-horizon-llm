@@ -1,9 +1,6 @@
-# blackboard.py
-
 from __future__ import annotations
 
 
-import numpy as np
 import asyncio
 import json
 import logging
@@ -36,6 +33,12 @@ from typing import (
     runtime_checkable,
 )
 
+# Optional NumPy: accelerate cosine when available, degrade gracefully when not.
+try:
+    import numpy as np  # type: ignore
+except Exception:  # pragma: no cover
+    np = None
+
 from constants import (
     PLANNER_PROMPT,
     CQAP_SECTION_PROMPT,
@@ -66,6 +69,8 @@ from constants import (
     CONTROL_UNIT_PROMPT,
     AGENT_PROMPTS,
     GENERIC_AGENT_PROMPT,
+    DECIDER_PROMPT,
+    LLM_CANDIDATES,
     CLAIMS_EXTRACT_PROMPT,
     REFLECT_LEARN_PROMPT,
     REFLECT_GOV_PROMPT,
@@ -85,6 +90,9 @@ _GLOBAL_BURST_WINDOW = float(os.getenv("GLOBAL_BURST_WINDOW", "1.0"))
 KLINE_EMBED_DIM = int(os.getenv("KLINE_EMBED_DIM", "256"))
 KLINE_MAX_ENTRIES = int(os.getenv("KLINE_MAX_ENTRIES", "2000"))
 AUDIT_MAX_CHARS = int(os.getenv("AUDIT_MAX_CHARS", "8192"))
+KLINE_CLUSTER_EVERY = int(os.getenv("KLINE_CLUSTER_EVERY", "12"))
+MEMSTORE_SAVE_EVERY = int(os.getenv("MEMSTORE_SAVE_EVERY", "6"))
+AUDIT_REDACT = bool(int(os.getenv("AUDIT_REDACT", "1")))
 
 # Heuristic tuning parameters
 CLUSTER_MIN_SIM = 0.3
@@ -114,6 +122,40 @@ if not _AUDIT.handlers:
     _AUDIT.addHandler(_ah)
     _AUDIT.setLevel(logging.INFO)
     _AUDIT.propagate = False
+
+
+# --- Audit redaction helpers (mask secrets in logs) ---------------------------
+# We keep these light-weight and string-based to avoid mutating original dicts.
+_RE_EMAIL = re.compile(r"([A-Z0-9._%+-]+)@([A-Z0-9.-]+\.[A-Z]{2,})", re.I)
+_RE_BEARER = re.compile(r"\bBearer\s+[A-Za-z0-9._\-+/=]{10,}", re.I)
+_RE_API_KV = re.compile(
+    r"\b(?:api[_-]?key|x[-_]api[-_]key|secret|token)\b\s*[:=]\s*([A-Za-z0-9._\-+/=]{6,})",
+    re.I,
+)
+
+
+def _redact_text(s: str) -> str:
+    """Mask obvious secrets; leave surrounding context intact."""
+    if not isinstance(s, str):
+        return s
+    s = _RE_BEARER.sub("Bearer ***", s)
+    # Replace only the value capture group to preserve keys and punctuation.
+    s = _RE_API_KV.sub(lambda m: m.group(0).replace(m.group(1), "***"), s)
+    # Obfuscate local-part of emails but keep domain for triage.
+    s = _RE_EMAIL.sub(lambda m: f"{m.group(1)[:1]}***@{m.group(2)}", s)
+    return s
+
+
+def _audit(payload: Mapping[str, Any]) -> None:
+    """Centralized audit logger with redaction and JSON encoding."""
+    try:
+        raw = json.dumps(payload, ensure_ascii=False)
+        _AUDIT.info(_redact_text(raw))
+    except Exception:  # pragma: no cover
+        try:
+            _AUDIT.info(str(payload))
+        except Exception:
+            pass
 
 
 class BlackboardError(Exception): ...
@@ -373,6 +415,8 @@ class MemoryStore:
         self.path = path
         self.data: Dict[str, Any] = {}
         self._io_lock = threading.RLock()
+        self._dirty = 0
+        self._upserts_since_cluster = 0
         self._load()
     def _load(self) -> None:
         try:
@@ -399,12 +443,16 @@ class MemoryStore:
             except Exception:
                 pass
             self.data = {"judges": {}, "patch_stats": {}, "klines": {}, "beliefs": {}}
-    def save(self) -> None:
+    def save(self, force: bool = False) -> None:
+        self._dirty += 1
+        if not force and self._dirty < MEMSTORE_SAVE_EVERY:
+            return
         with self._io_lock:
             tmp = self.path.with_suffix(".tmp")
             try:
                 tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
                 tmp.replace(self.path)
+                self._dirty = 0
             except Exception as e:
                 _LOG.exception("MemoryStore save failed: %s", e)
     def bump_judge(self, judge: str, delta: float) -> None:
@@ -689,8 +737,13 @@ class MemoryStore:
             entry["classification"] = classification
         entry["ts"] = time.time()
         root[sig] = entry
-        # size guard
-        self.form_clusters()  # Auto-cluster on upsert.
+        self._upserts_since_cluster += 1
+        if self._upserts_since_cluster >= KLINE_CLUSTER_EVERY:
+            try:
+                self.form_clusters()
+            except Exception:
+                pass
+            self._upserts_since_cluster = 0
         try:
             self.prune_klines(KLINE_MAX_ENTRIES)
         except Exception:
@@ -712,7 +765,7 @@ class MemoryStore:
             "penalty": entry.get("penalty", 0),
             "links": entry.get("links", {}),
         }
-        _AUDIT.info(json.dumps({"explain_recall": {"sig": sig, "info": info}}, ensure_ascii=False))
+        _audit({"explain_recall": {"sig": sig, "info": info}})
         return info
     def link_klines(self, sig_a: str, sig_b: str, weight: float) -> None:
         """Bidirectionally link two klines with a utility weight."""
@@ -729,7 +782,7 @@ class MemoryStore:
         links = entry.get("links") or {}
         neigh = sorted(links.items(), key=lambda kv: kv[1], reverse=True)[:max_neighbors]
         for nsig, w in neigh:
-            _AUDIT.info(json.dumps({"cluster_recall": {"source": sig, "neighbor": nsig, "weight": w}}, ensure_ascii=False))
+            _audit({"cluster_recall": {"source": sig, "neighbor": nsig, "weight": w}})
         return neigh
     def append_kline_trace(self, sig: str, trace: Dict[str, Any]) -> None:
         """Append an execution trace snapshot to a kline."""
@@ -789,7 +842,7 @@ class MemoryStore:
             except Exception:
                 continue
         if plan_nodes:
-            _AUDIT.info(json.dumps({"trace_replay": {"sig": sig, "source": source}}, ensure_ascii=False))
+            _audit({"trace_replay": {"sig": sig, "source": source}})
         return out
     def promote_kline(self, parent_sig: str, child_sigs: List[str]) -> None:
         """
@@ -1605,8 +1658,16 @@ class Orchestrator:
         """Generate query-related experts plus predefined roles (Sec.3.1)."""
         ag_prompt = _fmt(AGENT_GENERATION_PROMPT, question=query)
         raw = await self.planner_llm.complete(ag_prompt, temperature=0.7)
-        data = safe_json_loads(_first_json_object(raw) or "{}")
-        experts = [{"role": k, "description": v} for k, v in data.items()][:n_experts]
+        data = safe_json_loads(_first_json_object(raw) or "{}") or {}
+        experts: List[Dict[str, str]] = []
+        for k, spec in data.items():
+            if isinstance(spec, dict):
+                info = {"role": k, **spec}
+            else:
+                info = {"role": k, "description": str(spec)}
+            info.setdefault("description", "")
+            experts.append(info)
+        experts = experts[:n_experts]
         predefined = [
             {"role": "planner", "description": "Generate plans to solve the problem."},
             {"role": "decider", "description": "Assess if enough for final answer."},
@@ -1615,9 +1676,8 @@ class Orchestrator:
             {"role": "conflict_resolver", "description": "Detect conflicts and initiate resolutions."},
         ]
         agents = experts + predefined
-        llm_set = ["Llama-3.1-70b-Instruct", "Qwen-2.5-72b-Instruct"]
         for ag in agents:
-            ag["llm"] = random.choice(llm_set)
+            ag.setdefault("llm", random.choice(LLM_CANDIDATES))
         return agents
 
     async def _reserve_tokens(self, n: int) -> bool:
@@ -1648,27 +1708,34 @@ class Orchestrator:
 
     
     async def _hedged_solve(self, task: str, context: Mapping[str, Any], timeout: float) -> SolverResult:
-        """
-        Run with optional hedging. Token budget is accounted ONLY on the result that wins.
-        """
-        async def _call():
+        """Primary+backup hedge with refundable token reserve."""
+        async def _call() -> SolverResult:
             async with GLOBAL_LIMITER.slot():
                 return await asyncio.wait_for(self.solver.solve(task, context=context), timeout=timeout)
         if not self.config.hedge_enable:
-            res = await _call()
-            return self._coerce_solver_result(res)
-        # Hedge path
+            return self._coerce_solver_result(await _call())
+
         primary = asyncio.create_task(_call())
-        async def _backup():
+        charged = False
+
+        async def _backup() -> SolverResult:
+            nonlocal charged
             await asyncio.sleep(self.config.hedge_delay_sec)
-            return await _call()
+            async with GLOBAL_LIMITER.slot():
+                if not await self._reserve_tokens(HEDGE_TOKEN_RESERVE):
+                    return SolverResult(text="")
+                charged = True
+                return await asyncio.wait_for(self.solver.solve(task, context=context), timeout=timeout)
+
         backup = asyncio.create_task(_backup())
         done, pending = await asyncio.wait({primary, backup}, return_when=asyncio.FIRST_COMPLETED)
-        winner = list(done)[0]
         for p in pending:
             p.cancel()
-        res = winner.result()
-        return self._coerce_solver_result(res)
+        res = self._coerce_solver_result(list(done)[0].result())
+        if charged and not (res.text or "").strip():
+            async with self._token_lock:
+                self._tokens_used = max(0, self._tokens_used - HEDGE_TOKEN_RESERVE)
+        return res
 
     async def _run_judges(self, text: str, contract: Contract) -> List[Critique]:
         judges = self.judges or JUDGES.get_all()
@@ -1743,10 +1810,7 @@ class Orchestrator:
             deliberation_log[name] = {"score": c.score, "weight": w, "vote": vote}
             delta = 0.01 if abs(c.score - final) <= 0.1 else -0.01
             self.memory.bump_judge(name, delta)
-        try:
-            _AUDIT.info(json.dumps({"deliberation": deliberation_log}, ensure_ascii=False))
-        except Exception:
-            pass
+        _audit({"deliberation": deliberation_log})
         self.memory.save()
         return final
 
@@ -1892,7 +1956,7 @@ class Orchestrator:
             prompt + f"\nBlackboard:\n{bb_content}", temperature=0.7
         )
         data = safe_json_loads(_first_json_object(raw) or "{}")
-        return data.get("chosen agents", [])
+        return data.get("chosen_agents", [])
 
     async def execute_agent(
         self,
@@ -1915,6 +1979,14 @@ class Orchestrator:
         ctx = {"llm": agent.get("llm"), "role": agent["role"]}
         res = await self._hedged_solve(prompt, ctx, timeout=20.0)
         proposed = res.text.strip()
+        obj = _first_json_object(proposed)
+        if obj:
+            data = safe_json_loads(obj, default={})
+            if isinstance(data, dict) and "output" in data:
+                try:
+                    proposed = str(data["output"])
+                except Exception:
+                    pass
         # Governance (Tier-1)
         self_model = self.memory.get_self_model(self._current_sig or "") if self._current_sig else {}
         try:
@@ -1987,24 +2059,28 @@ class Orchestrator:
                     clean_list = safe_json_loads(msg).get("clean list", [])
                     for cl in clean_list:
                         public.pop(cl["useless message"], None)
+                elif role == "decider":
+                    msg = await self.execute_agent(ag, public)
+                    d_obj = safe_json_loads(_first_json_object(msg) or "{}") or {}
+                    ready = bool(d_obj.get("ready", False))
+                    key = d_obj.get("final_message_key")
+                    if ready and isinstance(key, str) and key in public:
+                        public["final"] = public[key]
+                        return public
+                    public[f"decider_{msg_id}"] = f"ready={ready}; reason={d_obj.get('reason','')}"
+                    msg_id += 1
                 else:
                     msg = await self.execute_agent(ag, public)
                     public[f"{role}_{msg_id}"] = msg
                     msg_id += 1
-                if role == "decider" and "final answer" in msg.lower():
-                    return public
             if t == max_rounds:
-                votes: Dict[str, str] = {}
-                for ag in agents:
-                    vote = await self.execute_agent(ag, public)
-                    votes[ag["role"]] = vote
-                vote_embs = {k: _hash_embed(v) for k, v in votes.items()}
-                sims = {
-                    k: sum(_cosine(vote_embs[k], vote_embs[ok]) for ok in vote_embs if ok != k)
-                    for k in votes
-                }
-                final_key = max(sims, key=sims.get)
-                public["final"] = votes[final_key]
+                synth_prompt = (
+                    "Synthesize a single coherent answer from the following blackboard messages.\n"
+                    "Return ONLY the final answer in markdown; do not include the inputs.\n\n" +
+                    "\n".join(f"[{k}]\n{v}\n" for k, v in public.items())
+                )
+                res = await self._hedged_solve(synth_prompt, {"mode": "bb_synthesis"}, timeout=30.0)
+                public["final"] = res.text.strip()
         return public
 
     async def _improve_until_ok(self, node: Node, initial: SolverResult, blackboard: Dict[str, Artifact], context_text: str = "") -> Artifact:
@@ -2177,11 +2253,11 @@ class Orchestrator:
                     # Retry once
                     if failed_node:
                         try:
-                            _AUDIT.info(json.dumps({"rewire":"retry","node":failed_node.name,"reason":str(e)}))
+                            _audit({"rewire": "retry", "node": failed_node.name, "reason": str(e)})
                             retry_art = await run_with_sem(failed_node)
                             art = retry_art
                         except Exception as e2:
-                            _AUDIT.info(json.dumps({"rewire":"bypass","node":failed_node.name,"error":str(e2),"deps":failed_node.deps,"succ":succ.get(failed_node.name,[])}, ensure_ascii=False))
+                            _audit({"rewire": "bypass", "node": failed_node.name, "error": str(e2), "deps": failed_node.deps, "succ": succ.get(failed_node.name, [])})
                             blackboard[failed_node.name] = Artifact(node=failed_node.name, content="", qa=QAResult(ok=False), critiques=[], status="bypassed")
                             for m in succ.get(failed_node.name, []):
                                 cur = by_name[m]
@@ -2493,7 +2569,11 @@ class Orchestrator:
                      status: str = "ok") -> None:
         def _cap(obj: Any) -> Any:
             try:
-                s = json.dumps(obj, ensure_ascii=False)
+                if isinstance(obj, dict):
+                    red = {k: (_redact_text(v) if isinstance(v, str) else v) for k, v in obj.items()}
+                else:
+                    red = _redact_text(obj)
+                s = json.dumps(red, ensure_ascii=False)
             except Exception:
                 s = str(obj)
             if len(s) > AUDIT_MAX_CHARS:
@@ -2509,10 +2589,7 @@ class Orchestrator:
             "input": _cap(input or {}),
             "output": _cap(output or {}),
         }
-        try:
-            _AUDIT.info(json.dumps(ev, ensure_ascii=False))
-        except Exception:
-            pass
+        _audit(ev)
 
     def predict_quality(self, scores: Sequence[float]) -> float:
         """Moving average + exponential smoothing to damp noise."""
@@ -2547,18 +2624,17 @@ class Orchestrator:
         if unstable:
             self.Homeostat().adjust(self)  # Adjust controller when unstable.
         self._last_energy = energy
-        try:
-            _AUDIT.info(json.dumps({"stability_trace": {
+        _audit({
+            "stability_trace": {
                 "run_id": self.run_id,
                 "energy": round(energy, 4),
                 "avg_score": round(avg_score, 4),
                 "used_tokens": used,
                 "max_tokens": max_tokens,
                 "failure_rate": round(failure_rate, 4),
-                "unstable": unstable
-            }}, ensure_ascii=False))
-        except Exception:
-            pass
+                "unstable": unstable,
+            }
+        })
         return not unstable
 
 class EchoSolver:

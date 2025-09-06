@@ -1,16 +1,31 @@
 # constants.py
 
 # === Planner ===
-# (planner prompt unchanged)
 PLANNER_PROMPT = (
-    "You are a decomposition engine.\n"
-    "Return STRICT JSON:\n"
-    "{\"nodes\":["
-    "{\"name\":str,"
-    "\"tmpl\":str,"          # template ID, e.g. R3_VALIDATION, A5_PATTERNS, GENERIC
-    "\"deps\":[str],"
-    "\"role\":\"backbone\"|\"adjunct\""
-    "]}\n"
+    "You are a decomposition engine and must emit the richest structured plan the model can support.\n"
+    "Return STRICT JSON with a single object containing key \"nodes\":\n"
+    "{\n"
+    "  \"nodes\": [\n"
+    "    {\n"
+    "      \"name\": str,                    \n"
+    "      \"tmpl\": str,                    \n"
+    "      \"deps\": [str],                  \n"
+    "      \"role\": \"backbone\"|\"adjunct\",\n"
+    "      \"contract\": {                   \n"
+    "        \"format\": {\"markdown_section\": str},\n"
+    "        \"tests\": [{\"kind\": str, \"arg\": any}]\n"
+    "      },\n"
+    "      \"prompt\": str,                  \n"
+    "      \"metadata\": {                   \n"
+    "        \"description\": str,\n"
+    "        \"keywords\": [str],\n"
+    "        \"acceptance_criteria\": [str],\n"
+    "        \"risks\": [str],\n"
+    "        \"success_metrics\": [str]\n"
+    "      }\n"
+    "    }\n"
+    "  ]\n"
+    "}\n"
     "Rules:\n"
     "- names unique in [a-z0-9_-]\n"
     "- deps only to previously listed nodes\n"
@@ -335,17 +350,45 @@ TOO_SHORT_HINT = "Too short to be useful; add specifics."
 
 # Agent orchestration prompts
 AGENT_GENERATION_PROMPT = (
-    "You are provided a question. Give me a list of 1 to 3 expert roles... "
+    "You are provided a question. Generate 1-3 expert agent roles that best progress the solution.\n"
+    "Return STRICT JSON object mapping role => spec.\n"
+    "Spec schema:\n"
+    "{\n"
+    "  \"description\": str,\n"
+    "  \"keywords\": [str],\n"
+    "  \"capabilities\": [str],\n"
+    "  \"llm_hints\": {\"style\": str, \"max_output_tokens\": int}\n"
+    "}\n"
+    "Question:\n{question}\n"
 )
+
 CONTROL_UNIT_PROMPT = (
-    "Your task is to schedule other agents. Given roles:\n{role_list}\nRespond as JSON with key 'chosen agents'."
+    "Your task is to schedule agents for the next turn.\n"
+    "Given roles:\n{role_list}\n"
+    "Return STRICT JSON: {\"chosen_agents\":[str],\"rationale\":str}.\n"
+    "- Only choose from provided role names.\n"
+    "- Choose at most 3.\n"
 )
+
 GENERIC_AGENT_PROMPT = (
-    "You are {role_name}. Question: {question}\nBlackboard:\n{bb}\nReturn your output or JSON with an 'output' field."
+    "You are {role_name}.\n"
+    "Question: {question}\n"
+    "Blackboard:\n{bb}\n"
+    "Return either:\n"
+    "1) Plain markdown content intended for users, OR\n"
+    "2) STRICT JSON object with an 'output' field (string) and optional 'evidence':[str].\n"
 )
+
+DECIDER_PROMPT = (
+    "You are the decider. Determine if the blackboard already contains a satisfactory final answer.\n"
+    "Blackboard:\n{bb}\n"
+    "Return STRICT JSON: {\"ready\": bool, \"final_message_key\": str|null, \"confidence\": float, \"reason\": str}.\n"
+    "- If ready is true, final_message_key must reference an existing public blackboard key.\n"
+)
+
 AGENT_PROMPTS = {
     "planner": "You are planner. Devise a step-by-step plan. Blackboard:\n{bb}",
-    "decider": "You are decider. Determine if a final answer is present. Blackboard:\n{bb}",
+    "decider": DECIDER_PROMPT,
     "critic": "You are critic. Point out errors or missing pieces. Blackboard:\n{bb}",
     "cleaner": (
         "You are cleaner. Identify useless messages and return JSON {\"clean list\": [{\"useless message\": id}]}.\nBlackboard:\n{bb}"
@@ -671,4 +714,45 @@ example_mission_plan = {
         },
     ],
 }
+
+# === Mission planning (verbose metadata expansion) ===
+MISSION_PLAN_SCHEMA_HINT = {
+    "Strategy": [
+        {
+            "Objective": {
+                "id": "O1",
+                "title": "Human-readable objective",
+                "description": "2-3 sentences",
+                "keywords": ["k1","k2"],
+                "owner": "role or persona",
+                "priority": "P0|P1|P2",
+                "timeline": "e.g., T+2d",
+                "risks": ["risk1","risk2"],
+                "success_metrics": ["metric1","metric2"],
+                "acceptance_criteria": ["crit1","crit2"]
+            },
+            "queries": {"Q1": "?", "Q2": "?"},
+            "tactics": [
+                {
+                    "t1": "Short tactic name",
+                    "description": "What and how",
+                    "dependencies": ["artifact_or_tactic_name"],
+                    "expected_artifact": "file_or_doc_name",
+                    "keywords": ["k1","k2"],
+                    "inputs": ["input1","input2"],
+                    "outputs": ["output1","output2"],
+                    "checks": ["check1","check2"]
+                }
+            ]
+        }
+    ]
+}
+
+# LLM candidate names for agent assignment
+LLM_CANDIDATES = [
+    "Llama-3.1-70b-Instruct",
+    "Qwen-2.5-72b-Instruct",
+    "Mixtral-8x22B-Instruct",
+    "Claude-3.5-Sonnet-compat",
+]
 
