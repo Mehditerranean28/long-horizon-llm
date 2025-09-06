@@ -206,6 +206,29 @@ FALLBACK_NODE_PLACEHOLDER = "_Fallback: no content generated for this node._"
 OVERLONG_HINT = "Overlong; trim repetition and tighten language."
 TOO_SHORT_HINT = "Too short to be useful; add specifics."
 
+# Agent orchestration prompts
+AGENT_GENERATION_PROMPT = (
+    "You are provided a question. Give me a list of 1 to 3 expert roles... "
+)
+CONTROL_UNIT_PROMPT = (
+    "Your task is to schedule other agents. Given roles:\n{role_list}\nRespond as JSON with key 'chosen agents'."
+)
+GENERIC_AGENT_PROMPT = (
+    "You are {role_name}. Question: {question}\nBlackboard:\n{bb}\nReturn your output or JSON with an 'output' field."
+)
+AGENT_PROMPTS = {
+    "planner": "You are planner. Devise a step-by-step plan. Blackboard:\n{bb}",
+    "decider": "You are decider. Determine if a final answer is present. Blackboard:\n{bb}",
+    "critic": "You are critic. Point out errors or missing pieces. Blackboard:\n{bb}",
+    "cleaner": (
+        "You are cleaner. Identify useless messages and return JSON {\"clean list\": [{\"useless message\": id}]}.\nBlackboard:\n{bb}"
+    ),
+    "conflict_resolver": (
+        "You are conflict_resolver. Find conflicting messages and return JSON {\"conflict list\": [{\"agent\": role}]}.\nBlackboard:\n{bb}"
+    ),
+}
+VOTING_PROMPT = "Based on blackboard, give your answer... "
+
 
 # --- Default CQAP (Cognitive Query Analysis Protocol) ---
 cognitive_query_analysis_protocol = {

@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+try:  # Add for forecasting; assume available or pip-install.
+    import numpy as np
+except Exception:  # pragma: no cover - fallback when NumPy missing
+    np = None
 import asyncio
 import json
 import logging
 import hashlib
 import math
 import heapq
-import random
+import random  # For LLM selection per paper.
 import statistics
 import uuid
 import os
@@ -57,9 +61,29 @@ from constants import (
     FALLBACK_NODE_PLACEHOLDER,
     OVERLONG_HINT,
     TOO_SHORT_HINT,
+    AGENT_GENERATION_PROMPT,
+    CONTROL_UNIT_PROMPT,
+    AGENT_PROMPTS,
+    GENERIC_AGENT_PROMPT,
 )
 
 from kern.src.kern.core import init_logging
+
+# Environment-driven defaults
+_GLOBAL_MAX_CONCURRENT = int(os.getenv("GLOBAL_MAX_CONCURRENT", "16"))
+_GLOBAL_QPS = int(os.getenv("GLOBAL_QPS", "8"))
+_GLOBAL_BURST_WINDOW = float(os.getenv("GLOBAL_BURST_WINDOW", "1.0"))
+KLINE_EMBED_DIM = int(os.getenv("KLINE_EMBED_DIM", "256"))
+KLINE_MAX_ENTRIES = int(os.getenv("KLINE_MAX_ENTRIES", "2000"))
+AUDIT_MAX_CHARS = int(os.getenv("AUDIT_MAX_CHARS", "8192"))
+
+# Heuristic tuning parameters
+CLUSTER_MIN_SIM = 0.3
+CLUSTER_LINK_WEIGHT = 0.8
+FORECAST_DEFAULT_TOKENS = 500
+FORECAST_ALPHA = 0.3
+FORECAST_BUFFER = 1.2
+HEDGE_TOKEN_RESERVE = 100
 
 
 try:
@@ -201,9 +225,12 @@ def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
     """Cosine similarity for equal-length vectors. Returns [-1, 1]."""
     if not a or not b:
         return 0.0
-    s = 0.0
-    for x, y in zip(a, b):
-        s += (x or 0.0) * (y or 0.0)
+    if np is not None:
+        na = np.asarray(a, dtype=float)
+        nb = np.asarray(b, dtype=float)
+        s = float(np.dot(na, nb))
+    else:
+        s = sum((x or 0.0) * (y or 0.0) for x, y in zip(a, b))
     return float(max(-1.0, min(1.0, s)))
 
 def _quantize(v: List[float]) -> List[int]:
@@ -245,13 +272,7 @@ class GlobalRateLimiter:
     def slot(self) -> "GlobalRateLimiter._Slot":
         return GlobalRateLimiter._Slot(self)
 
-_GLOBAL_MAX_CONCURRENT = int(os.getenv("GLOBAL_MAX_CONCURRENT", "16"))
-_GLOBAL_QPS = int(os.getenv("GLOBAL_QPS", "8"))
-_GLOBAL_BURST_WINDOW = float(os.getenv("GLOBAL_BURST_WINDOW", "1.0"))
 GLOBAL_LIMITER = GlobalRateLimiter(_GLOBAL_MAX_CONCURRENT, _GLOBAL_QPS, _GLOBAL_BURST_WINDOW)
-KLINE_EMBED_DIM = int(os.getenv("KLINE_EMBED_DIM", "256"))
-KLINE_MAX_ENTRIES = int(os.getenv("KLINE_MAX_ENTRIES", "2000"))
-AUDIT_MAX_CHARS = int(os.getenv("AUDIT_MAX_CHARS", "8192"))
 
 @dataclass(slots=True)
 class SolverResult:
@@ -387,6 +408,16 @@ class MemoryStore:
         self.save()
 
     # --- kline cognitive cache: nearest-neighbor query + meta synthesis ---
+    def form_clusters(self, min_sim: float = CLUSTER_MIN_SIM) -> None:
+        """Dynamically link and promote klines into hierarchies based on similarity."""
+        all_entries = list(self.iter_klines())
+        for i, (sig_a, ent_a) in enumerate(all_entries):
+            for sig_b, ent_b in all_entries[i+1:]:
+                if _cosine(ent_a.get("embedding", []), ent_b.get("embedding", [])) >= min_sim:
+                    self.link_klines(sig_a, sig_b, CLUSTER_LINK_WEIGHT)
+                    if ent_a.get("level", 0) > 0 or ent_b.get("level", 0) > 0:
+                        parent_sig = self._sig(f"meta_{sig_a}_{sig_b}", "Composite")
+                        self.promote_kline(parent_sig, [sig_a, sig_b])
     def iter_klines(self) -> Iterable[Tuple[str, Dict[str, Any]]]:
         """Yield (sig, entry) for all klines; empty if none."""
         for k, v in (self.data.get("klines") or {}).items():
@@ -451,6 +482,7 @@ class MemoryStore:
         clusters: List[Tuple[str, float, Dict[str, Any], List[Tuple[str, float]]]] = []
         for sim, sig, e in sorted(heap, key=lambda t: t[0], reverse=True):
             neigh = self.cluster_retrieve(sig)
+            if not neigh: continue  # Skip isolates.
             cscore = sim
             for nsig, w in neigh:
                 linked = self.get_kline(nsig)
@@ -573,6 +605,7 @@ class MemoryStore:
         entry["ts"] = time.time()
         root[sig] = entry
         # size guard
+        self.form_clusters()  # Auto-cluster on upsert.
         try:
             self.prune_klines(KLINE_MAX_ENTRIES)
         except Exception:
@@ -679,6 +712,10 @@ class MemoryStore:
         parent["level"] = max(child_levels or [0]) + 1
         parent["ts"] = time.time()
         self.save()
+
+    def _sig(self, query: str, cls_kind: str = "Composite") -> str:
+        key = (cls_kind + ":" + re.sub(r"\s+", " ", query).strip().lower())[:512]
+        return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
 _DELIVERABLE = re.compile(r"\b(design|architecture|spec|contract|roadmap|benchmark|compare|trade[- ]?offs?|rfc|plan|protocol|implementation|experiment|evaluate)\b", re.I)
 _DEPENDENCY = re.compile(r"\b(after|before|then|depends|precede|follow|stage|phase|blocker|unblock)\b", re.I)
@@ -1383,6 +1420,7 @@ class OrchestratorConfig:
     plan_from_meta: bool = bool(int(os.getenv("PLAN_FROM_META", "1")))
     use_llm_classifier: bool = bool(int(os.getenv("USE_LLM_CLASSIFIER", "1")))
     ensemble_mode: bool = bool(int(os.getenv("ENSEMBLE_MODE", "1")))
+    forecast_enable: bool = bool(int(os.getenv("FORECAST_ENABLE", "0")))
 
 @dataclass(slots=True)
 class Orchestrator:
@@ -1429,8 +1467,39 @@ class Orchestrator:
 
     def _add_tokens(self, result: SolverResult) -> int:
         used = result.total_tokens or ((result.prompt_tokens or 0) + (result.completion_tokens or 0)) or self._approx_tokens(result.text)
-        self._tokens_used += int(used); 
+        self._tokens_used += int(used);
         return int(used)
+
+    def forecast_tokens(self, remaining_nodes: int) -> int:
+        """Simple exponential smoothing forecast of tokens per node."""
+        if not self._score_history:
+            return FORECAST_DEFAULT_TOKENS
+        rates = [self._approx_tokens(art.content) for art in getattr(self, "_last_artifacts", {}).values()][-10:]
+        if not rates:
+            return FORECAST_DEFAULT_TOKENS
+        s = rates[0]
+        for r in rates[1:]:
+            s = FORECAST_ALPHA * r + (1 - FORECAST_ALPHA) * s
+        return int(s * remaining_nodes * FORECAST_BUFFER)
+
+    async def generate_agents(self, query: str, n_experts: int = 3) -> List[Dict[str, str]]:
+        """Generate query-related experts plus predefined roles (Sec.3.1)."""
+        ag_prompt = _fmt(AGENT_GENERATION_PROMPT, question=query)
+        raw = await self.planner_llm.complete(ag_prompt, temperature=0.7)
+        data = safe_json_loads(_first_json_object(raw) or "{}")
+        experts = [{"role": k, "description": v} for k, v in data.items()][:n_experts]
+        predefined = [
+            {"role": "planner", "description": "Generate plans to solve the problem."},
+            {"role": "decider", "description": "Assess if enough for final answer."},
+            {"role": "critic", "description": "Point out errors in messages."},
+            {"role": "cleaner", "description": "Detect and remove useless/redundant messages."},
+            {"role": "conflict_resolver", "description": "Detect conflicts and initiate resolutions."},
+        ]
+        agents = experts + predefined
+        llm_set = ["Llama-3.1-70b-Instruct", "Qwen-2.5-72b-Instruct"]
+        for ag in agents:
+            ag["llm"] = random.choice(llm_set)
+        return agents
 
     async def _reserve_tokens(self, n: int) -> bool:
         async with self._token_lock:
@@ -1469,6 +1538,8 @@ class Orchestrator:
         async def _backup():
             await asyncio.sleep(self.config.hedge_delay_sec)
             async with GLOBAL_LIMITER.slot():
+                if not await self._reserve_tokens(HEDGE_TOKEN_RESERVE):
+                    return SolverResult(text="")  # Early exit on budget.
                 return await asyncio.wait_for(self.solver.solve(task, context=context), timeout=timeout)
         backup = asyncio.create_task(_backup())
         done, pending = await asyncio.wait({primary, backup}, return_when=asyncio.FIRST_COMPLETED)
@@ -1645,6 +1716,7 @@ class Orchestrator:
         bullets = []
         for issue in qa.issues:
             if issue.code in {"missing_header","header_missing"}: bullets.append(f"- Include the markdown header '{issue.details.get('wanted')}'.")
+            elif issue.code == "nonempty": bullets.append("- Generate substantive content; avoid placeholders.")
             elif issue.code == "too_short": bullets.append(f"- Expand with at least {issue.details.get('needed',150)} words of concrete details and examples.")
             elif issue.code == "regex_fail": bullets.append(f"- Ensure pattern present: {issue.details.get('pattern')}.")
             elif issue.code == "contains_missing": bullets.append(f"- Include this key term: {issue.details.get('needle')}.")
@@ -1682,6 +1754,101 @@ class Orchestrator:
         if not art.qa.ok:
             art.status = "needs_more_depth"
         return art
+
+    async def control_unit_select(
+        self,
+        query: str,
+        blackboard_public: Dict[str, str],
+        agents: List[Dict[str, str]],
+    ) -> List[str]:
+        """Control unit LLM to select agents (Fig.6, Eq.2)."""
+        role_list = "\n".join(f"{a['role']}: {a['description']}" for a in agents)
+        bb_content = "\n".join(f"{k}: {v}" for k, v in blackboard_public.items())
+        prompt = _fmt(CONTROL_UNIT_PROMPT, question=query, role_list=role_list)
+        raw = await self.planner_llm.complete(
+            prompt + f"\nBlackboard:\n{bb_content}", temperature=0.7
+        )
+        data = safe_json_loads(_first_json_object(raw) or "{}")
+        return data.get("chosen agents", [])
+
+    async def execute_agent(
+        self,
+        agent: Dict[str, str],
+        blackboard_public: Dict[str, str],
+        private: Optional[Dict[str, str]] = None,
+    ) -> str:
+        """Execute an agent with a role-specific prompt (Fig.4)."""
+        bb = dict(blackboard_public)
+        if private:
+            bb.update(private)
+        bb_str = "\n".join(f"{k}: {v}" for k, v in bb.items())
+        sys_prompt = AGENT_PROMPTS.get(agent["role"], GENERIC_AGENT_PROMPT)
+        prompt = _fmt(
+            sys_prompt,
+            role_name=agent["role"],
+            question=self._current_query,
+            bb=bb_str,
+        )
+        ctx = {"llm": agent.get("llm"), "role": agent["role"]}
+        res = await self._hedged_solve(prompt, ctx, timeout=20.0)
+        msg = res.text.strip()
+        if "output" in msg:
+            data = safe_json_loads(msg)
+            msg = data.get("output", msg)
+        return msg
+
+    async def blackboard_cycle(
+        self,
+        query: str,
+        agents: List[Dict[str, str]],
+        max_rounds: int = 4,
+    ) -> Dict[str, str]:
+        """Run blackboard cycles until consensus or voting."""
+        public: Dict[str, str] = {}
+        private: Dict[str, Dict[str, str]] = {}
+        msg_id = 0
+        for t in range(1, max_rounds + 1):
+            selected = await self.control_unit_select(query, public, agents)
+            for role in selected:
+                ag = next(a for a in agents if a["role"] == role)
+                if role == "conflict_resolver":
+                    msg = await self.execute_agent(ag, public)
+                    conflicts = safe_json_loads(msg).get("conflict list", [])
+                    if conflicts:
+                        space_id = f"debate_{t}_{msg_id}"
+                        private[space_id] = {}
+                        conf_agents = [next(a for a in agents if a["role"] == c["agent"]) for c in conflicts]
+                        for conf_ag in conf_agents:
+                            priv_msg = await self.execute_agent(conf_ag, public, private[space_id])
+                            private[space_id][f"{conf_ag['role']}_{msg_id}"] = priv_msg
+                            msg_id += 1
+                        resolve_msg = await self.execute_agent(ag, public, private[space_id])
+                        public[f"resolved_{space_id}_{msg_id}"] = resolve_msg
+                        msg_id += 1
+                elif role == "cleaner":
+                    msg = await self.execute_agent(ag, public)
+                    clean_list = safe_json_loads(msg).get("clean list", [])
+                    for cl in clean_list:
+                        public.pop(cl["useless message"], None)
+                else:
+                    msg = await self.execute_agent(ag, public)
+                    public[f"{role}_{msg_id}"] = msg
+                    msg_id += 1
+                if role == "decider" and "final answer" in msg.lower():
+                    return public
+            if t == max_rounds:
+                votes: Dict[str, str] = {}
+                for ag in agents:
+                    vote = await self.execute_agent(ag, public)
+                    votes[ag["role"]] = vote
+                vote_embs = {k: _hash_embed(v) for k, v in votes.items()}
+                sims = {
+                    k: sum(_cosine(vote_embs[k], vote_embs[ok]) for ok in vote_embs if ok != k)
+                    for k in votes
+                }
+                final_key = max(sims, key=sims.get)
+                public["final"] = votes[final_key]
+        return public
 
     async def _improve_until_ok(self, node: Node, initial: SolverResult, blackboard: Dict[str, Artifact], context_text: str = "") -> Artifact:
         content = initial.text
@@ -1763,7 +1930,8 @@ class Orchestrator:
             raise ExecutionError(f"solver failed for node {node.name}: {e}") from e
         art = await self._improve_until_ok(node, res, blackboard, context_text=ctx)
         art = await self._recommend_node(node, art)
-        # track rolling score history for stability/forecasting
+        # track rolling score history for stability and forecasting
+        self._score_history.append(self.predict_quality([c.score for c in art.critiques]))
         if art.critiques:
             try:
                 self._score_history.append(self.deliberate_judges(art.critiques))
@@ -1920,23 +2088,17 @@ class Orchestrator:
             except Exception: pass
         return recs, revised
 
+
     async def run(self, query: str) -> Dict[str, Any]:
         self._tokens_used = 0
         run_id = uuid.uuid4().hex[:8]
         self.run_id = run_id
         self._audit_event("orchestrator", "start", input={"query": query})
-        if self.judges is None: self.judges = JUDGES.get_all()
-        if self.config.enable_llm_judge: self.judges = list(self.judges) + [LLMJudge(solver=self.solver)]
-        # 0) Optional CQAP meta-first via LLM
-        meta_cqap: Optional[Dict[str, Any]] = None
-        if self.config.use_cqap and self.config.use_llm_cqap:
-            try:
-                meta_cqap = await _llm_json_phase(self.planner_llm, "CQAP", _cqap_meta_prompt(query, self.cqap or cognitive_query_analysis_protocol))
-                if meta_cqap:
-                    self.cqap = meta_cqap  # persist for plan builders
-            except Exception as e:
-                _LOG.warning("CQAP meta LLM phase failed: %s", e)
-        # 1) Classification (after meta; honors short-but-deep via LLM classifier if enabled)
+        if self.judges is None:
+            self.judges = JUDGES.get_all()
+        if self.config.enable_llm_judge:
+            self.judges = list(self.judges) + [LLMJudge(solver=self.solver)]
+
         if self.config.use_llm_classifier:
             try:
                 cls = await classify_query_llm(query, self.planner_llm)
@@ -1950,91 +2112,14 @@ class Orchestrator:
         self._current_query = query
         monitor = asyncio.create_task(self.Homeostat().monitor(self))
         try:
-            hints = ""
-            if self.config.kline_enable:
-                try:
-                    nbrs = self.memory.query_klines(
-                        query, top_k=self.config.kline_top_k, min_sim=self.config.kline_min_sim
-                    )
-                    # explain recall for transparency
-                    for nsig, _sim, _ in nbrs:
-                        try:
-                            self.memory.explain_recall(nsig)
-                        except Exception:
-                            pass
-                    hints_txt = self.memory.summarize_neighbors(
-                        nbrs, char_budget=self.config.kline_hint_tokens * 4
-                    )
-                    if hints_txt:
-                        hints = "\n\n" + hints_txt
-                except Exception as e:
-                    _LOG.warning("kline hint retrieval failed: %s", e)
+            agents = await self.generate_agents(query)
+            raw_bb = await self.blackboard_cycle(query, agents)
+            blackboard = {
+                k: Artifact(node=k, content=v, qa=QAResult(ok=True), critiques=[])
+                for k, v in raw_bb.items()
+            }
             try:
-                # 2) Plan selection priority:
-                #    a) if plan_from_meta: ask LLM to emit a mission plan using meta (if available)
-                #    b) else if CQAP exists: compile CQAP→nodes
-                #    c) else: default planner
-                plan: Optional[Plan] = None
-                if self.config.plan_from_meta and (meta_cqap or self.cqap):
-                    try:
-                        mp_raw = await _llm_json_phase(self.planner_llm, "MISSION", _mission_plan_prompt(query, meta_cqap or self.cqap or {}), timeout=40.0, max_retries=1)
-                        if isinstance(mp_raw, dict) and (mp_raw.get("Strategy") or []):
-                            self.mission_plan = mp_raw
-                            plan = build_plan_from_mission(mp_raw, query=query)
-                    except Exception as e:
-                        _LOG.warning("Mission plan LLM phase failed: %s", e)
-                if plan is None:
-                    if self.config.use_cqap and (meta_cqap or self.cqap):
-                        plan = build_plan_from_cqap(query, meta_cqap or self.cqap or {}, cls)
-                    else:
-                        plan = await make_plan(self.planner_llm, query + hints, cls)
-            except PlanningError:
-                _LOG.warning("planner failed; attempting replay from best prior kline")
-                nodes_replay: List[Node] = []
-                best_sig: Optional[str] = None
-                try:
-                    prev = self.memory.query_klines(query, top_k=3, min_sim=0.1)
-                    for sig, _sim, ent in prev:
-                        nodes_total = ent.get("nodes") or []
-                        ok_nodes = ent.get("ok_nodes") or []
-                        if nodes_total and len(ok_nodes) / len(nodes_total) >= 0.8:
-                            best_sig = sig
-                            break
-                    if best_sig is None and prev:
-                        best_sig = prev[0][0]
-                    if best_sig:
-                        nodes_replay = self.memory.replay_kline(best_sig)
-                except Exception:
-                    nodes_replay = []
-                if nodes_replay and best_sig:
-                    _AUDIT.info(json.dumps({"trace_replay": {"sig": best_sig}}, ensure_ascii=False))
-                    plan = Plan(nodes=_validate_and_repair_plan(nodes_replay))
-                else:
-                    _LOG.warning("replay unavailable; circuit-breaker to Atomic")
-                    plan = Plan(nodes=[Node(name="answer",
-                                            tmpl="GENERIC",
-                                            deps=[],
-                                            contract=_parse_contract({"format":{"markdown_section":"Answer"}}, "Answer"),
-                                            role="backbone")])
-            _LOG.info("[run=%s] plan: %d nodes", run_id, len(plan.nodes))
-            backbone_nodes, adjunct_nodes = self._partition_backbone(plan)
-            bb_board = await self.adaptive_run_dag(backbone_nodes)
-            if self.on_pass_complete:
-                try: await self.on_pass_complete("backbone", bb_board)
-                except Exception as e: _LOG.warning("on_pass_complete backbone failed: %s", e)
-            ad_board = await self.adaptive_run_dag(adjunct_nodes) if adjunct_nodes else {}
-            if self.on_pass_complete:
-                try: await self.on_pass_complete("adjuncts", ad_board)
-                except Exception as e: _LOG.warning("on_pass_complete adjuncts failed: %s", e)
-            blackboard = {**bb_board, **ad_board}
-            # expose to controller
-            try:
-                self._last_artifacts = blackboard  # used by Homeostat
-            except Exception:
-                pass
-            # Stability check after DAG passes
-            try:
-                self.stability_check()
+                self._last_artifacts = blackboard
             except Exception:
                 pass
             arts = list(blackboard.values())
@@ -2047,58 +2132,23 @@ class Orchestrator:
                         self.memory.penalize_kline(sig)
                     except Exception:
                         pass
-            final = self._compose(plan, blackboard, include_resolution=resolution)
-
+            final = "\n\n".join(a.content for a in arts)
             global_recs, final_cohesive = await self._cohesion_pass(query, final, conflicts, resolution)
-            # Persist execution trace snapshot
-            try:
-                trace = {
-                    "nodes": [
-                        {
-                            "name": n.name,
-                            "tmpl": n.tmpl,
-                            "deps": n.deps,
-                            "role": n.role,
-                            "prompt_override": n.prompt_override,
-                            "contract": {"format": {"markdown_section": n.contract.format.get("markdown_section")},
-                                         "tests": [{"kind": t.kind, "arg": t.arg} for t in n.contract.tests]},
-                        }
-                        for n in plan.nodes
-                    ],
-                    "statuses": {k: v.status for k, v in blackboard.items()},
-                    "issues": {k: [i.code for i in v.qa.issues] if v.qa else [] for k, v in blackboard.items()},
-                }
-                self.memory.append_kline_trace(sig, trace)
-            except Exception as e:
-                _LOG.warning("trace persist failed: %s", e)
             try:
                 self.memory.upsert_kline(
                     sig,
-                    {
-                        "nodes": [
-                            {"name": n.name, "role": n.role, "deps": n.deps, "section": n.contract.format.get("markdown_section")}
-                            for n in plan.nodes
-                        ],
-                        "ok_nodes": [k for k, v in blackboard.items() if v.status == "ok"],
-                        "global_recs": global_recs[:8],
-                        "run": run_id,
-                        "contradictions": subjects,
-                    },
+                    {"agents": [a["role"] for a in agents], "global_recs": global_recs[:8], "run": run_id},
                     query=query,
                     classification={"kind": cls.kind, "score": cls.score},
                 )
             except Exception as e:
                 _LOG.warning("kline save failed: %s", e)
-
-            # Final stability check post-cohesion
             try:
                 self.stability_check()
             except Exception:
                 pass
-
-            return {
+            result = {
                 "classification": {"kind": cls.kind, "score": cls.score},
-                "plan": [{"name": n.name, "deps": n.deps, "role": n.role, "section": n.contract.format.get("markdown_section")} for n in plan.nodes],
                 "artifacts": {k: {"content": v.content, "status": v.status, "recommendations": v.recommendations} for k, v in blackboard.items()},
                 "conflicts": conflicts,
                 "resolution": resolution,
@@ -2107,9 +2157,9 @@ class Orchestrator:
                 "global_recommendations": global_recs,
                 "run_id": run_id,
             }
+            return {**result, "agents": [a["role"] for a in agents]}
         finally:
             monitor.cancel()
-
 
     def _audit_event(self, node: str, stage: str,
                      input: Optional[Dict[str, Any]] = None,
@@ -2164,10 +2214,12 @@ class Orchestrator:
         unstable = False
         if self._last_energy is not None and energy > self._last_energy + 1e-6:
             unstable = True
-            try:
-                self.Homeostat().adjust(self)
-            except Exception:
-                pass
+        try:
+            self._last_energy = energy
+        except Exception:
+            pass
+        if unstable:
+            self.Homeostat().adjust(self)  # Adjust controller when unstable.
         self._last_energy = energy
         try:
             _AUDIT.info(json.dumps({"stability_trace": {
@@ -2184,7 +2236,7 @@ class Orchestrator:
         return not unstable
 
 class EchoSolver:
-    """Trivial echo solver (for demo & testing)."""
+    """Trivial echo solver for demo and testing. Handles optional context."""
     async def solve(
         self, task: str, context: Optional[Mapping[str, Any]] = None
     ) -> str | SolverResult:
@@ -2265,6 +2317,7 @@ async def _demo() -> None:
                    help="Disable dynamic mission planning and use regular planner/CQAP instead")
     p.add_argument("--print-mission", action="store_true",
                    help="Print the generated mission plan JSON")
+    p.add_argument("--forecast", action="store_true", help="Enable token forecasting logs")
     args = p.parse_args()
 
     if args.verbose:
@@ -2325,6 +2378,7 @@ async def _demo() -> None:
             enable_llm_judge=False,
             # If a mission is provided, we don't need CQAP; otherwise the orchestrator may use it.
             use_cqap=False if mission_plan else True,
+            forecast_enable=args.forecast,
         ),
         cqap=cognitive_query_analysis_protocol,         # used only if mission is unavailable and CQAP is enabled
         on_node_start=_on_start,
@@ -2339,7 +2393,11 @@ async def _demo() -> None:
     print(result["final"])
 
     print("\n===== 📋 PLAN =====")
-    print(json.dumps(result["plan"], indent=2))
+    plan = result.get("plan")
+    if plan is not None:
+        print(json.dumps(plan, indent=2))
+    else:
+        print("(no plan)")
 
     print("\n===== 🧩 ARTIFACTS =====")
     for k, v in result["artifacts"].items():
