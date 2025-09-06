@@ -776,13 +776,14 @@ export async function runPipeline(
   if (!query || !query.trim()) {
     throw new ApiError('Query must be a non-empty string.', { status: 400 });
   }
+  const cleaned = query.trim();
   logMetric('API runPipeline');
   const options = correlationId
     ? { headers: { 'x-request-id': correlationId } }
     : undefined;
   const { promise } = api.post<RunPipelineResponse>(
     '/v1/run',
-    { query },
+    { query: cleaned },
     options,
   );
   const result = await promise;
@@ -802,14 +803,28 @@ export async function runPipelineStream(
   if (!query || !query.trim()) {
     throw new ApiError('Query must be a non-empty string.', { status: 400 });
   }
+  const cleaned = query.trim();
   logMetric('API runPipelineStream');
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json',
+  };
+  const token = getAuthToken();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
   if (correlationId) headers['x-request-id'] = correlationId;
-  const res = await fetch(`${API_BASE_URL}/v1/run/stream`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ query }),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE_URL}/v1/run/stream`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ query: cleaned }),
+    });
+  } catch (err) {
+    throw new ApiError('Network error connecting to backend', {
+      isNetworkError: true,
+      originalError: err as Error,
+    });
+  }
   if (!res.body) {
     throw new ApiError('Empty stream from backend', { status: res.status });
   }

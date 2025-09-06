@@ -15,6 +15,7 @@ module.exports = function createRoutes(stripe, priceId, webhookSecret) {
   router.use(require('./contact'));
   router.use(require('./publicContact'));
   router.use(require('./publicChat'));
+  router.use(require('./run'));
   router.use(require('./dataRequest'));
   router.use(require('./cookiePreferences'));
   router.use(require('./clientInfo'));

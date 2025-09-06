@@ -1,28 +1,86 @@
-# Reasoning Pipeline API
-Building a custom, template-driven AI reasoning "black box" for structured problem-solving
+![Long Horizon banner](Karnten.png)
 
-A prompt-orchestrated LLM controller: reasoning happens through language outputs plus structured JSON, not learned recurrent state.
+# Long Horizon LLM
 
-A policy-driven reasoning orchestrator that takes any query and runs it through a repeatable pipeline:
+**Long Horizon LLM** combines a Python reasoning engine with a Next.js frontend to experiment with long-form, template-driven problem solving. The stack exposes a small HTTP API and a browser UI for running queries through a multi-step "black box" pipeline.
 
-> Analyze → Plan. Use metadata (Goal/Priority/Precision/etc.) to produce a structured plan (frames → tactics with deps).
+## Features
 
-> Execute per tactic with template packs (your A* cognitive + R* reasoning + “subconscious”) to generate a candidate,
+- Plan/execute/critique/synthesize pipeline for structured reasoning
+- FastAPI backend with `/v1/run` and `/v1/run/stream` endpoints
+- Next.js frontend that proxies all requests and offers a "Sovereign (local)" model option
+- In-browser fallback LLM for offline demos
 
-> Self-critique & improve in short loops,
-
-> Judge & select the most useful artifacts,
-
-> Synthesize & polish a final answer.
-
-> Core design values: explainability (meta, plan, artifacts), quality gating (critics/judges), parallelism (layered topo), policy control (selectors & precision), and eventually auditability (provenance, budgets, logs).
-
-## Repository layout
+## Project Structure
 
 - `backend/`: FastAPI server, pipeline logic, and a lean `blackboard.py` module used in tests and production.
 - `backend/blackboard_pkg/`: experimental, feature-rich blackboard engine kept for reference.
 - `frontend/`: Next.js client that communicates with the backend API.
 
+## Getting Started
+The repository houses three services:
+
+- **FastAPI backend** on `8000`
+- **Express proxy** on `3000`
+- **Next.js UI** on `9002`
+
+### Run all services
+
+```bash
+./dev.sh
+```
+
+The script spawns all three processes and streams their logs to your terminal. Press <kbd>Ctrl+C</kbd> to terminate the stack.
+
+### Manual setup
+
+#### Backend
+
+1. Install dependencies (FastAPI, Uvicorn, Pydantic).
+2. Start the server:
+
+```bash
+uvicorn backend.server:app --reload
+```
+
+#### Frontend
+
+1. Install packages and launch the Next.js app:
+
+```bash
+cd frontend
+npm install
+NEXT_PUBLIC_API_BASE_URL=http://localhost:3000/api npm run dev
+```
+
+This serves the UI on `http://localhost:9002` and sends API calls to the Express proxy on port `3000`. Ensure the proxy knows where the backend lives by setting the following in `frontend/.env`:
+
+```env
+BACKEND_HTTP_URL=http://localhost:8000
+BACKEND_WS_URL=ws://localhost:8000/ws
+```
+
+Once running, use the model selector to choose **Sovereign (local)**, which routes queries through the Express proxy to the Python server on port `8000`.
+
+### API Endpoints
+
+Backend endpoints are exposed directly on the FastAPI server and are typically accessed via the Express proxy under `/api`.
+
+| Method & Path | Description | Example Payload |
+| --- | --- | --- |
+| `GET /health` | Health probe | – |
+| `POST /v1/run` | Execute the reasoning pipeline and return the final answer. | `{ "query": "Explain the moon landing." }` |
+| `POST /v1/run/stream` | Stream pipeline milestones as newline-delimited JSON. | `{ "query": "Explain the moon landing." }` |
+| `POST /v1/genai` | Lightweight text generation helper. | `{ "prompt": "Hello", "temperature": 0.2 }` |
+| `GET /v1/templates` | List available cognitive and reasoning templates. | – |
+
+Example request:
+
+```bash
+curl -X POST http://localhost:3000/api/v1/run \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"What is AI?"}'
+```
 
 # Blackboard
 

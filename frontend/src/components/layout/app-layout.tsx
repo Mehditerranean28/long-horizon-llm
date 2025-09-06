@@ -38,6 +38,7 @@ import { ListTreeIcon, SearchIcon as EvidenceIconLucide, Workflow, Settings, Use
 import { useIsMobile } from '@/hooks/use-mobile';
 import { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import { WEBSOCKET_MAX_RECONNECTS_EVENT } from '@/api/websocket';
+import { API_BASE_URL } from '@/constants/api';
 import type { ChatMessage, EvidenceSegment } from '@/types';
 import { cn } from "@/utils";
 import { useToast } from '@/hooks/use-toast';
@@ -190,6 +191,14 @@ export function AppLayout({ initialLanguage }: { initialLanguage?: LanguageCode 
 
   const initialModels = useMemo<Model[]>(
     () => [
+      {
+        id: "sovereign-local",
+        name: "Sovereign",
+        variant: "local",
+        description: `Proxy via ${API_BASE_URL}`,
+        url: API_BASE_URL,
+        provider: "backend",
+      },
       { id: "o4-mini-high", name: "ChatGPT", variant: "o4-mini-high", description: "Fastest and most affordable o4 model.", provider: "openai" },
       { id: "o4", name: "ChatGPT", variant: "o4", description: "Our most advanced model.", provider: "openai" },
       { id: "o3.5", name: "ChatGPT", variant: "3.5", description: "Great for everyday tasks.", provider: "openai" },
@@ -216,6 +225,20 @@ export function AppLayout({ initialLanguage }: { initialLanguage?: LanguageCode 
   const [showCustomModelDialog, setShowCustomModelDialog] = useState(false);
   const [customModelName, setCustomModelName] = useState("");
   const [customModelUrl, setCustomModelUrl] = useState("");
+
+  // On initial load, check backend health and warn if unreachable
+  useEffect(() => {
+    (async () => {
+      const backendOk = await checkBackendConnectivity();
+      if (!backendOk) {
+        toast({
+          title: t.backendUnreachableTitle,
+          description: t.mockResponsesDescription,
+          variant: 'destructive',
+        });
+      }
+    })();
+  }, [toast, t]);
 
   const handleModelSelect = (modelId: string) => {
     const selectedModel = availableModels.find(m => m.id === modelId);
