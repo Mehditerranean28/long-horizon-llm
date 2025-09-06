@@ -37,7 +37,7 @@ const CALL_TO_PROTO_BRAIN: Record<string, string> = {
 // Define environment-dependent configuration in a centralized manner.
 // Use consistent naming for clarity (e.g., `_URL` suffix).
 const LOCAL_LLM_API_URL = process.env.NEXT_PUBLIC_LOCAL_LLM_URL || 'http://localhost:11434';
-const BACKEND_API_URL = process.env.NEXT_PUBLIC_SOVEREIGN_API_URL || ''; // Should be explicitly defined in production envs
+const BACKEND_API_URL = API_BASE_URL; // normalized base for Express proxy
 
 // Determine if we should use the backend API based on its presence.
 // This is a global switch for the entire action module.
@@ -47,10 +47,6 @@ const USE_BACKEND_API = !!BACKEND_API_URL;
 const USE_PIPELINE_STREAMING =
   process.env.NEXT_PUBLIC_USE_PIPELINE_STREAMING !== '0';
 
-const COGNITIVE_PROMPT = ""
-const CLARIFICATION_PROMPT = ""
-const DEEP_RESEARCH_PROMPT = ""
-const SIMPLE_CHAT_PROMPT = ""
 
 // Cache backend health after the first check
 let backendReachable: boolean | null = null;
@@ -108,52 +104,41 @@ class LocalLLMError extends ActionError {
 // --- Local LLM Proxy Function ---
 // Encapsulates the logic for querying a local LLM, including robust error handling.
 async function queryLocalLLM(
-  prompt: string,
+  query: string,
   model: string,
-  systemPrompt: string,
-  baseUrl?: string
+  baseUrl?: string,
 ): Promise<string> {
   const targetUrl = baseUrl || LOCAL_LLM_API_URL;
   if (!targetUrl) {
     throw new LocalLLMError('Local LLM URL is not configured.');
   }
-  // Prevent accidental routing to the main backend API which does not expose
-  // the Ollama-style ``/api/chat`` endpoint.  If misconfigured, raise a
-  // typed error so callers can gracefully fall back to the backend pipeline.
-  if (BACKEND_API_URL && targetUrl.startsWith(BACKEND_API_URL)) {
-    throw new LocalLLMError('Local LLM URL points to backend API.');
-  }
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10000);
-    const res = await fetch(`${targetUrl}/api/chat`, {
+    const res = await fetch(`${targetUrl}/v1/run`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model,
-        stream: false,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: prompt }
-        ]
-      }),
+      body: JSON.stringify({ query }),
       // Add a timeout for robustness against unresponsive local LLMs
       // This timeout is for the fetch request itself, not task execution.
-      signal: controller.signal
+      signal: controller.signal,
     });
     clearTimeout(timer);
 
     if (!res.ok) {
       const errorBody = await res.text(); // Read raw text for better debugging
-      throw new LocalLLMError(`Local LLM API returned non-OK status: ${res.status}. Body: ${errorBody.substring(0, 200)}`, res.status);
+      throw new LocalLLMError(
+        `Local LLM API returned non-OK status: ${res.status}. Body: ${errorBody.substring(0, 200)}`,
+        res.status,
+      );
     }
 
     const data = await res.json();
-    // Validate response structure for Ollama
-    if (!data.message?.content) {
+    // Validate backend-style response structure
+    if (typeof data.final !== 'string') {
       throw new LocalLLMError('Local LLM response structure is invalid.');
     }
-    return data.message.content as string;
+    return data.final as string;
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
       throw new LocalLLMError('Local LLM request timed out.');
@@ -535,7 +520,6 @@ const backendAnswerQuestionAction: ActionHandler<AnswerQuestionInput, AnswerQues
         const answer = await queryLocalLLM(
           input.question,
           _model || '',
-          COGNITIVE_PROMPT,
           provider === 'client-local' ? modelUrl : undefined,
         );
         return { answer, mockEvidenceSegments: [], queued: false, correlationId: uuidv4() };
@@ -628,7 +612,6 @@ const backendGenerateClarificationAction: ActionHandler<GenerateClarificationInp
         const text = await queryLocalLLM(
           query,
           model || '',
-          CLARIFICATION_PROMPT,
           provider === 'client-local' ? modelUrl : undefined
         );
         return { clarificationText: text, mockEvidenceSegments: [], queued: false, correlationId: uuidv4() };
@@ -693,7 +676,6 @@ const backendDeepResearchAction: ActionHandler<DeepResearchInput, DeepResearchOu
         const summary = await queryLocalLLM(
           query,
           model || '',
-          DEEP_RESEARCH_PROMPT,
           provider === 'client-local' ? modelUrl : undefined
         );
         return { summary, nodes: [], edges: [], mockEvidenceSegments: [], queued: false, correlationId: uuidv4() };
@@ -756,7 +738,6 @@ const backendSimpleChatAction: ActionHandler<AnswerQuestionInput, AnswerQuestion
         const answer = await queryLocalLLM(
           payload.query,
           model || '',
-          SIMPLE_CHAT_PROMPT,
           provider === 'client-local' ? modelUrl : undefined
         );
         return { answer, mockEvidenceSegments: [], queued: false, correlationId: uuidv4() };

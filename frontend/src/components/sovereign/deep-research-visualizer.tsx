@@ -25,7 +25,7 @@ interface DeepResearchVisualizerProps {
 }
 
 const Flow = ({ initialNodes, initialEdges }: DeepResearchVisualizerProps) => {
-  const isMockMode = !process.env.NEXT_PUBLIC_SOVEREIGN_API_URL;
+  const isMockMode = !process.env.NEXT_PUBLIC_API_BASE_URL;
   const { nodes: mockNodes, edges: mockEdges } = useMemo(() => {
     const plan = getExampleMissionPlanAsDocument('Mock mission');
     return transformMissionPlanToFlowData(plan);

@@ -717,10 +717,12 @@ export function useSovereignChat(options?: { simpleMode?: boolean }): UseSoverei
   }, []);
 
   const submitQuery = async (
-    query: string,
+    rawQuery: string,
     attachmentInput?: { name: string; type: string; dataUri?: string } | null,
     skillName?: string | null
   ) => {
+    const query = rawQuery.trim();
+    if (!query) return;
     logMetric('Submit query', { query, skillName });
     const tokenBudget = Number(localStorage.getItem('tokenBudget') || '16000');
     const timeBudgetSeconds = Number(localStorage.getItem('timeBudget') || '300');

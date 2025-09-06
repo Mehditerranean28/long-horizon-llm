@@ -1,6 +1,6 @@
 let worker: Worker | null = null;
 
-export async function queryBrowserLLM(prompt: string): Promise<string> {
+export async function queryBrowserLLM(query: string): Promise<string> {
   if (!worker) {
     worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
   }
@@ -14,6 +14,6 @@ export async function queryBrowserLLM(prompt: string): Promise<string> {
       }
     };
     worker!.addEventListener('message', handleMessage);
-    worker!.postMessage({ text: prompt });
+    worker!.postMessage({ text: query });
   });
 }
