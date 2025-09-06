@@ -19,7 +19,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from blackboard.core import (
+from .core import (
     Artifact,
     Contract,
     Node,

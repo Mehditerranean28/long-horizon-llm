@@ -1884,6 +1884,70 @@ class Orchestrator:
             "final": final,
         }
 
+    async def run_stream(self, query: str):
+        """Yield milestone dictionaries during :meth:`run` execution.
+
+        Each yielded item describes a milestone: ``meta`` analysis, ``plan``
+        selection, every produced ``artifact``, the final ``selected`` set and
+        the ultimate ``final`` answer.  Intended for streaming over HTTP as
+        newline-delimited JSON.
+        """
+
+        if not query or not query.strip():
+            raise ValueError("empty query")
+
+        anaplanner, executor, evaluator, _kit, (a_clusters, r_clusters) = self._build()
+        clean_query, mission = _extract_mission(query)
+        target_query = clean_query.strip() if clean_query else ""
+        if not target_query and mission:
+            qc = str(mission.get("query_context", "")).strip()
+            target_query = qc or ""
+        if not target_query:
+            target_query = query.strip()
+
+        meta, auto_plan = await anaplanner.analyze_and_plan(target_query)
+        plan = _mission_to_plan(mission) if mission else auto_plan
+        yield {"type": "meta", "data": meta}
+        yield {"type": "plan", "data": plan}
+
+        produced_by_tactic: Dict[str, Artifact] = {}
+        produced_by_key: Dict[str, Artifact] = {}
+
+        async def fetch_deps(dep_names: List[str]) -> Dict[str, Artifact]:
+            out: Dict[str, Artifact] = {}
+            for d in dep_names:
+                art = produced_by_tactic.get(d) or produced_by_key.get(d)
+                if not art and d:
+                    for k in reversed(list(produced_by_key.keys())):
+                        if k.endswith("/" + d) or k.split("/")[-1] == d:
+                            art = produced_by_key[k]
+                            break
+                if art:
+                    out[d] = art
+            return out
+
+        all_artifacts: List[Artifact] = []
+        for frame in plan["frames"]:
+            artifacts = await executor.execute_frame(meta, frame, fetch_deps, top_k_a=6, top_k_r=8)
+            for a in artifacts:
+                all_artifacts.append(a)
+                produced_by_key[a.key] = a
+                tname = a.meta.get("tactic")
+                if isinstance(tname, str):
+                    produced_by_tactic[tname] = a
+                yield {"type": "artifact", "key": a.key, "meta": a.meta}
+
+        selected = await evaluator.assess(all_artifacts)
+        yield {"type": "selected", "artifacts": [a.key for a in selected]}
+        chosen = selected or all_artifacts[:1]
+        final = await evaluator.synthesize(target_query, chosen)
+        for _ in range(3):
+            new_final = await evaluator.polish(final)
+            if new_final == final:
+                break
+            final = new_final
+        yield {"type": "final", "text": final}
+
 
 async def _demo(query: str) -> None:
     orch = Orchestrator(
