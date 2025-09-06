@@ -2,7 +2,8 @@
 
 # dependencies
 /__pycache__
-/.next
+/frontend/.next
+/frontend/node_modules
 /node_modules
 /.pnp
 .pnp.*
@@ -16,7 +17,7 @@
 /coverage
 
 # next.js
-/.next/
+/.next
 /out/
 
 # production
