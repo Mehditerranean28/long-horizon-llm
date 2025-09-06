@@ -9,7 +9,14 @@ import type {
   DeepResearchInput, DeepResearchOutput
 } from '@/types/action-io-types';
 import { v4 as uuidv4 } from 'uuid';
-import { createTask, waitForTaskCompletion, type TaskCreatePayload, type TaskStatusResponse } from '@/api/client'; // Assumed robust backend client
+import {
+  createTask,
+  waitForTaskCompletion,
+  runPipeline,
+  runPipelineStream,
+  type TaskCreatePayload,
+  type TaskStatusResponse,
+} from '@/api/client'; // Assumed robust backend client
 import fs from 'fs';
 import path from 'path';
 import { getExampleMissionPlanAsDocument, transformMissionPlanToFlowData } from '@/lib/mission-plan-parser';
@@ -35,6 +42,10 @@ const BACKEND_API_URL = process.env.NEXT_PUBLIC_SOVEREIGN_API_URL || ''; // Shou
 // Determine if we should use the backend API based on its presence.
 // This is a global switch for the entire action module.
 const USE_BACKEND_API = !!BACKEND_API_URL;
+// Flag controlling whether pipeline milestones are streamed or fetched in a
+// single response.  Defaults to streaming unless explicitly disabled.
+const USE_PIPELINE_STREAMING =
+  process.env.NEXT_PUBLIC_USE_PIPELINE_STREAMING !== '0';
 
 const COGNITIVE_PROMPT = ""
 const CLARIFICATION_PROMPT = ""
@@ -496,7 +507,7 @@ const mockSimpleChatAction: ActionHandler<AnswerQuestionInput, AnswerQuestionOut
 
 const backendAnswerQuestionAction: ActionHandler<AnswerQuestionInput, AnswerQuestionOutput> = async (
   input,
-  model,
+  _model,
   provider,
   correlationId,
   modelUrl
@@ -506,56 +517,74 @@ const backendAnswerQuestionAction: ActionHandler<AnswerQuestionInput, AnswerQues
       throw new ActionError('Question input cannot be empty.', 'INVALID_INPUT');
     }
 
-    const { payload, sanitized } = buildTaskPayload({
-      query: input.question,
-      callId: 'cognitive-analysis',
-      attachment: input.attachment,
-      tool: input.tool,
-      tokenBudget: input.tokenBudget,
-      timeBudgetSeconds: input.timeBudgetSeconds,
-      model,
-      provider,
-      protoBrainName: input.protoBrainName,
-    });
+    if (input.attachment) {
+      logWarn('BACKEND: Attachments are not supported by /v1/run', {
+        name: input.attachment.name,
+      });
+    }
 
     if (provider === 'client-local') {
       logMetric('BACKEND: Routing to local LLM for answerQuestionAction');
       const answer = await queryLocalLLM(
-        payload.query,
-        payload.model || '',
+        input.question,
+        _model || '',
         COGNITIVE_PROMPT,
-        provider === 'client-local' ? modelUrl : undefined
+        provider === 'client-local' ? modelUrl : undefined,
       );
-      if (sanitized) {
-        logVerbose('BACKEND: Attachment processed locally', { name: sanitized.name });
-      }
       return { answer, mockEvidenceSegments: [], queued: false, correlationId: uuidv4() };
     } else if (provider === 'transformersjs') {
       logMetric('BACKEND: Routing to transformersjs for answerQuestionAction');
-      const answer = await queryBrowserLLM(payload.query);
+      const answer = await queryBrowserLLM(input.question);
       return { answer, mockEvidenceSegments: [], queued: false, correlationId: uuidv4() };
     }
 
-    const { result: answer, queued, correlationId } = await executeBackendTask<string>({
-      payload,
-      parse: (status) =>
-        typeof status.result?.final_answer === 'string'
-          ? status.result.final_answer
-          : JSON.stringify(status.result?.final_answer || {}),
-    }, correlationId);
-
-    if (sanitized) {
-      logVerbose('BACKEND: Attachment processed successfully', { name: sanitized.name });
+    if (!(await ensureBackendConnectivity())) {
+      throw new BackendCommunicationError('Backend API unreachable.', 503);
     }
-    return { answer, mockEvidenceSegments: [], queued, correlationId };
+
+    let finalAnswer = '';
+    const reqId = correlationId || uuidv4();
+    try {
+      if (USE_PIPELINE_STREAMING) {
+        await runPipelineStream(
+          input.question,
+          (ev) => {
+            // Future listeners can react to each milestone here
+            if (ev.type === 'final') {
+              finalAnswer = ev.text || '';
+            }
+          },
+          reqId,
+        );
+        if (!finalAnswer) {
+          throw new Error('stream completed without final event');
+        }
+      } else {
+        const res = await runPipeline(input.question, reqId);
+        finalAnswer = res.final;
+      }
+    } catch (streamErr) {
+      logWarn('Stream failure, falling back to non-streaming', streamErr as Error);
+      const res = await runPipeline(input.question, reqId);
+      finalAnswer = res.final;
+    }
+    return {
+      answer: finalAnswer,
+      mockEvidenceSegments: [],
+      queued: false,
+      correlationId: reqId,
+    };
 
   } catch (err) {
     logError('BACKEND: Error in backendAnswerQuestionAction', err);
-    // Re-throw specific errors or wrap generic ones for consistent client-side handling
     if (err instanceof ActionError) {
       throw err;
     }
-    throw new BackendCommunicationError(`Failed to process answer question via backend: ${(err as Error).message}`, 500, {});
+    throw new BackendCommunicationError(
+      `Failed to process answer question via backend: ${(err as Error).message}`,
+      500,
+      {},
+    );
   }
 };
 

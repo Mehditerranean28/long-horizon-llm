@@ -754,6 +754,95 @@ export async function getRunStatus(correlationId: string): Promise<RunStatusResp
   return value;
 }
 
+export interface RunPipelineResponse {
+  request_id: string;
+  duration_ms: number;
+  meta: Record<string, any>;
+  plan: any;
+  artifacts: string[];
+  selected: string[];
+  final: string;
+}
+
+export interface PipelineEvent {
+  type: string;
+  [key: string]: any;
+}
+
+export async function runPipeline(
+  query: string,
+  correlationId?: string,
+): Promise<RunPipelineResponse> {
+  if (!query || !query.trim()) {
+    throw new ApiError('Query must be a non-empty string.', { status: 400 });
+  }
+  logMetric('API runPipeline');
+  const options = correlationId
+    ? { headers: { 'x-request-id': correlationId } }
+    : undefined;
+  const { promise } = api.post<RunPipelineResponse>(
+    '/v1/run',
+    { query },
+    options,
+  );
+  const result = await promise;
+  const value = result.unwrap();
+  logMetric('API runPipeline success', {
+    requestId: value.request_id,
+    durationMs: value.duration_ms,
+  });
+  return value;
+}
+
+export async function runPipelineStream(
+  query: string,
+  onEvent: (ev: PipelineEvent) => void,
+  correlationId?: string,
+): Promise<void> {
+  if (!query || !query.trim()) {
+    throw new ApiError('Query must be a non-empty string.', { status: 400 });
+  }
+  logMetric('API runPipelineStream');
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (correlationId) headers['x-request-id'] = correlationId;
+  const res = await fetch(`${API_BASE_URL}/v1/run/stream`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ query }),
+  });
+  if (!res.body) {
+    throw new ApiError('Empty stream from backend', { status: res.status });
+  }
+  if (!res.ok) {
+    throw new ApiError('Backend error', { status: res.status });
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const parts = buf.split('\n');
+    buf = parts.pop() ?? '';
+    for (const part of parts) {
+      if (!part.trim()) continue;
+      try {
+        onEvent(JSON.parse(part));
+      } catch (err) {
+        logError('Failed to parse pipeline event', err as Error);
+      }
+    }
+  }
+  if (buf.trim()) {
+    try {
+      onEvent(JSON.parse(buf));
+    } catch (err) {
+      logError('Failed to parse trailing pipeline event', err as Error);
+    }
+  }
+}
+
 /**
  * Polls for task completion, with exponential backoff for polling interval.
  * @param taskId The ID of the task to wait for.
