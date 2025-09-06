@@ -2,6 +2,14 @@
 
 # dependencies
 /__pycache__
+/backend/__pycache__
+/backend/blackboard_pkg/__pycache__
+/backend/kern/__pycache__
+/backend/tests/__pycache__
+/backend/kern/__pycache__
+/backend/tests/__pycache__
+/backend/kern/src/__pycache__
+/backend/prompts/__pycache__
 /frontend/.next
 /frontend/node_modules
 /node_modules

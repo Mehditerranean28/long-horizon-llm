@@ -410,7 +410,7 @@ class WatcherSettings:
     enabled: bool = True
     refresh_time: int = 5
     k8s_path: str = "/etc/config"
-    control_file: str = "/etc/adp/logcontrol.json"
+    control_file: str = "/etc/logcontrol.json"
     backoff: BackoffSettings = BackoffSettings(base=2.0, factor=2.0, jitter=0.2, max_delay=120.0)
 
 @dataclass(frozen=True)
