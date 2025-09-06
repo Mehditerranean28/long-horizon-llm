@@ -379,7 +379,9 @@ class MemoryStore:
     def get_kline(self, sig: str) -> Optional[Dict[str, Any]]:
         return self.data.setdefault("klines", {}).get(sig)
     def put_kline(self, sig: str, payload: Dict[str, Any]) -> None:
-        self.data.setdefault("klines", {})[sig] = payload
+        entry = dict(payload or {})
+        entry.setdefault("level", int(entry.get("level", 0)))
+        self.data.setdefault("klines", {})[sig] = entry
         self.save()
 
     # --- kline cognitive cache: nearest-neighbor query + meta synthesis ---
@@ -413,6 +415,7 @@ class MemoryStore:
         """
         Return top-k most similar past klines by cosine(query, entry.embedding).
         Falls back gracefully if older entries lack embeddings (they will be embedded on the fly).
+        Extends retrieval to surface linked clusters and hierarchical children.
         """
         qv = _hash_embed(query, dim=KLINE_EMBED_DIM)
         changed = False
@@ -439,35 +442,51 @@ class MemoryStore:
                 if "embedding_q" in entry and "embedding" in entry:
                     entry.pop("embedding", None)
             self.save()
-        results: List[Tuple[str, float, Dict[str, Any]]] = []
+        clusters: List[Tuple[str, float, Dict[str, Any], List[Tuple[str, float]]]] = []
         for sim, sig, e in sorted(heap, key=lambda t: t[0], reverse=True):
-            # boost similarity by linked neighbors
-            boost = 0.0
-            for lsig, w in (e.get("links") or {}).items():
-                linked = self.get_kline(lsig)
+            neigh = self.cluster_retrieve(sig)
+            cscore = sim
+            for nsig, w in neigh:
+                linked = self.get_kline(nsig)
                 if linked:
                     self._ensure_entry_embedding(linked, dim=KLINE_EMBED_DIM)
                     lev = linked.get("embedding")
                     if isinstance(lev, list):
-                        boost += w * _cosine(qv, lev)
-            sim_eff = max(-1.0, min(1.0, sim + 0.1 * boost))
-            results.append((sig, sim_eff, e))
-        # If a composite parent matches, traverse children and surface them too.
+                        cscore += 0.1 * w * _cosine(qv, lev)
+            clusters.append((sig, cscore, e, neigh))
+        clusters.sort(key=lambda t: t[1], reverse=True)
+
         extended: List[Tuple[str, float, Dict[str, Any]]] = []
         seen: set[str] = set()
-        for sig, sim_eff, e in results:
-            extended.append((sig, sim_eff, e)); seen.add(sig)
-            for cs in (e.get("children") or []):
-                if cs in seen: 
+
+        def _expand(s: str, score: float, entry: Dict[str, Any], depth: int) -> None:
+            if s in seen or depth > 3:
+                return
+            extended.append((s, score, entry))
+            seen.add(s)
+            if depth >= 3:
+                return
+            if int(entry.get("level", 0)) >= 1:
+                for cs in entry.get("children") or []:
+                    child = self.get_kline(cs)
+                    if child:
+                        self._ensure_entry_embedding(child, dim=KLINE_EMBED_DIM)
+                        _expand(cs, score * 0.98, child, depth + 1)
+
+        for sig, cscore, entry, neigh in clusters[: max(0, int(top_k))]:
+            _expand(sig, cscore, entry, 0)
+            for nsig, _w in neigh[:3]:
+                if nsig in seen:
                     continue
-                child = self.get_kline(cs)
-                if not child:
+                nentry = self.get_kline(nsig)
+                if not nentry:
                     continue
-                # Reuse parent's score with slight attenuation
-                extended.append((cs, sim_eff * 0.98, child))
-                seen.add(cs)
+                self._ensure_entry_embedding(nentry, dim=KLINE_EMBED_DIM)
+                _expand(nsig, cscore * 0.97, nentry, 0)
+            if len(extended) >= top_k * 4:
+                break
         extended.sort(key=lambda t: t[1], reverse=True)
-        return extended[: max(0, int(top_k))]
+        return extended[: top_k * 4]
 
 
     def summarize_neighbors(
@@ -537,6 +556,7 @@ class MemoryStore:
         root = self.data.setdefault("klines", {})
         entry = dict(root.get(sig) or {})
         entry.update(payload or {})
+        entry.setdefault("level", int(entry.get("level", 0)))
         if query is not None:
             emb = _hash_embed(query, dim=KLINE_EMBED_DIM)
             entry["embedding_q"] = _quantize(emb)
@@ -579,6 +599,14 @@ class MemoryStore:
             links = entry.setdefault("links", {})
             links[y] = weight
             self.put_kline(x, entry)
+    def cluster_retrieve(self, sig: str, max_neighbors: int = 3) -> List[Tuple[str, float]]:
+        """Return strongest linked neighbors for a given kline signature."""
+        entry = self.get_kline(sig) or {}
+        links = entry.get("links") or {}
+        neigh = sorted(links.items(), key=lambda kv: kv[1], reverse=True)[:max_neighbors]
+        for nsig, w in neigh:
+            _AUDIT.info(json.dumps({"cluster_recall": {"source": sig, "neighbor": nsig, "weight": w}}, ensure_ascii=False))
+        return neigh
     def append_kline_trace(self, sig: str, trace: Dict[str, Any]) -> None:
         """Append an execution trace snapshot to a kline."""
         entry = self.data.setdefault("klines", {}).setdefault(sig, {})
@@ -593,8 +621,10 @@ class MemoryStore:
         entry = (self.data.get("klines") or {}).get(sig) or {}
         plan_nodes = None
         traces = entry.get("traces") or []
+        source = "nodes"
         if traces and isinstance(traces[-1], dict):
             plan_nodes = traces[-1].get("nodes")
+            source = "trace"
         if plan_nodes is None:
             plan_nodes = entry.get("nodes")
         out: List["Node"] = []
@@ -603,19 +633,29 @@ class MemoryStore:
                 name = str(nd.get("name"))
                 deps = list(nd.get("deps") or [])
                 role = str(nd.get("role") or "adjunct")
-                section = str((nd.get("contract") or {}).get("format", {}).get("markdown_section") or nd.get("section") or name.title())
-                contract = _parse_contract(
-                    {"format": {"markdown_section": section}, "tests": (nd.get("tests") or [])},
-                    section
-                )
+                tmpl = str(nd.get("tmpl") or "GENERIC")
+                contract_dict = nd.get("contract") or {}
+                fmt = contract_dict.get("format") or {}
+                tests_raw = contract_dict.get("tests") or []
+                tests = []
+                for t in tests_raw:
+                    kind = t.get("kind")
+                    if kind is None:
+                        continue
+                    tests.append(TestSpec(kind=str(kind), arg=t.get("arg")))
+                contract = Contract(format=fmt, tests=tests)
+                prompt_override = nd.get("prompt_override") or nd.get("prompt")
                 out.append(Node(
                     name=name,
-                    tmpl=str(nd.get("tmpl") or "GENERIC"),
+                    tmpl=tmpl,
                     deps=deps,
                     contract=contract,
-                    role=role if role in {"backbone","adjunct"} else "adjunct"))
+                    role=role if role in {"backbone","adjunct"} else "adjunct",
+                    prompt_override=prompt_override))
             except Exception:
                 continue
+        if plan_nodes:
+            _AUDIT.info(json.dumps({"trace_replay": {"sig": sig, "source": source}}, ensure_ascii=False))
         return out
     def promote_kline(self, parent_sig: str, child_sigs: List[str]) -> None:
         """
@@ -623,10 +663,14 @@ class MemoryStore:
         """
         root = self.data.setdefault("klines", {})
         parent = root.setdefault(parent_sig, {"children": []})
-        parent.setdefault("children", [])
+        parent_children = parent.setdefault("children", [])
+        child_levels: List[int] = []
         for cs in child_sigs:
-            if cs not in parent["children"]:
-                parent["children"].append(cs)
+            if cs not in parent_children:
+                parent_children.append(cs)
+            child_entry = root.setdefault(cs, {})
+            child_levels.append(int(child_entry.get("level", 0)))
+        parent["level"] = max(child_levels or [0]) + 1
         parent["ts"] = time.time()
         self.save()
 
@@ -1893,13 +1937,23 @@ class Orchestrator:
             except PlanningError:
                 _LOG.warning("planner failed; attempting replay from best prior kline")
                 nodes_replay: List[Node] = []
+                best_sig: Optional[str] = None
                 try:
-                    prev = self.memory.query_klines(query, top_k=1, min_sim=0.1)
-                    if prev:
-                        nodes_replay = self.memory.replay_kline(prev[0][0])
+                    prev = self.memory.query_klines(query, top_k=3, min_sim=0.1)
+                    for sig, _sim, ent in prev:
+                        nodes_total = ent.get("nodes") or []
+                        ok_nodes = ent.get("ok_nodes") or []
+                        if nodes_total and len(ok_nodes) / len(nodes_total) >= 0.8:
+                            best_sig = sig
+                            break
+                    if best_sig is None and prev:
+                        best_sig = prev[0][0]
+                    if best_sig:
+                        nodes_replay = self.memory.replay_kline(best_sig)
                 except Exception:
                     nodes_replay = []
-                if nodes_replay:
+                if nodes_replay and best_sig:
+                    _AUDIT.info(json.dumps({"trace_replay": {"sig": best_sig}}, ensure_ascii=False))
                     plan = Plan(nodes=_validate_and_repair_plan(nodes_replay))
                 else:
                     _LOG.warning("replay unavailable; circuit-breaker to Atomic")
@@ -1944,6 +1998,7 @@ class Orchestrator:
                             "tmpl": n.tmpl,
                             "deps": n.deps,
                             "role": n.role,
+                            "prompt_override": n.prompt_override,
                             "contract": {"format": {"markdown_section": n.contract.format.get("markdown_section")},
                                          "tests": [{"kind": t.kind, "arg": t.arg} for t in n.contract.tests]},
                         }
