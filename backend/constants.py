@@ -206,6 +206,12 @@ FALLBACK_NODE_PLACEHOLDER = "_Fallback: no content generated for this node._"
 OVERLONG_HINT = "Overlong; trim repetition and tighten language."
 TOO_SHORT_HINT = "Too short to be useful; add specifics."
 
+# Agent orchestration prompts
+AGENT_GENERATION_PROMPT = "You are provided a question. Give me a list of 1 to 3 expert roles... "
+CONTROL_UNIT_PROMPT = "Your task is to schedule other agents... "
+AGENT_PROMPT_TEMPLATE = "You are {role_name} cooperating... "
+VOTING_PROMPT = "Based on blackboard, give your answer... "
+
 
 # --- Default CQAP (Cognitive Query Analysis Protocol) ---
 cognitive_query_analysis_protocol = {
