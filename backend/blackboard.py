@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+
 import numpy as np
 import asyncio
 import json
@@ -9,7 +10,7 @@ import logging
 import hashlib
 import math
 import heapq
-import random  # For LLM selection per paper.
+import random
 import statistics
 import uuid
 import os
@@ -60,8 +61,8 @@ from constants import (
     TOO_SHORT_HINT,
     AGENT_GENERATION_PROMPT,
     CONTROL_UNIT_PROMPT,
-    AGENT_PROMPT_TEMPLATE,
-    VOTING_PROMPT,
+    AGENT_PROMPTS,
+    GENERIC_AGENT_PROMPT,
 )
 
 from kern.src.kern.core import init_logging
@@ -1480,11 +1481,23 @@ class Orchestrator:
         return int(s * remaining_nodes * FORECAST_BUFFER)
 
     async def generate_agents(self, query: str, n_experts: int = 3) -> List[Dict[str, str]]:
-        """Generate query-related experts per paper's AG (Eq.1)."""
-        prompt = _fmt(AGENT_GENERATION_PROMPT, question=query)
-        raw = await self.planner_llm.complete(prompt, temperature=0.7)
+        """Generate query-related experts plus predefined roles (Sec.3.1)."""
+        ag_prompt = _fmt(AGENT_GENERATION_PROMPT, question=query)
+        raw = await self.planner_llm.complete(ag_prompt, temperature=0.7)
         data = safe_json_loads(_first_json_object(raw) or "{}")
-        return [{"role": k, "description": v} for k, v in data.items()]
+        experts = [{"role": k, "description": v} for k, v in data.items()][:n_experts]
+        predefined = [
+            {"role": "planner", "description": "Generate plans to solve the problem."},
+            {"role": "decider", "description": "Assess if enough for final answer."},
+            {"role": "critic", "description": "Point out errors in messages."},
+            {"role": "cleaner", "description": "Detect and remove useless/redundant messages."},
+            {"role": "conflict_resolver", "description": "Detect conflicts and initiate resolutions."},
+        ]
+        agents = experts + predefined
+        llm_set = ["Llama-3.1-70b-Instruct", "Qwen-2.5-72b-Instruct"]
+        for ag in agents:
+            ag["llm"] = random.choice(llm_set)
+        return agents
 
     async def _reserve_tokens(self, n: int) -> bool:
         async with self._token_lock:
@@ -1744,18 +1757,15 @@ class Orchestrator:
         self,
         query: str,
         blackboard_public: Dict[str, str],
-        agent_descriptions: List[Dict[str, str]],
+        agents: List[Dict[str, str]],
     ) -> List[str]:
-        """Control unit: Select agents per paper's ConU (Eq.2)."""
-        role_list = "\n".join(f"{a['role']}: {a['description']}" for a in agent_descriptions)
-        bb_content = "\n".join(blackboard_public.values())
-        prompt = _fmt(
-            CONTROL_UNIT_PROMPT,
-            question=query,
-            role_list=role_list,
-            bb_content=bb_content,
+        """Control unit LLM to select agents (Fig.6, Eq.2)."""
+        role_list = "\n".join(f"{a['role']}: {a['description']}" for a in agents)
+        bb_content = "\n".join(f"{k}: {v}" for k, v in blackboard_public.items())
+        prompt = _fmt(CONTROL_UNIT_PROMPT, question=query, role_list=role_list)
+        raw = await self.planner_llm.complete(
+            prompt + f"\nBlackboard:\n{bb_content}", temperature=0.7
         )
-        raw = await self.planner_llm.complete(prompt, temperature=0.7)
         data = safe_json_loads(_first_json_object(raw) or "{}")
         return data.get("chosen agents", [])
 
@@ -1763,73 +1773,80 @@ class Orchestrator:
         self,
         agent: Dict[str, str],
         blackboard_public: Dict[str, str],
-        private: bool = False,
+        private: Optional[Dict[str, str]] = None,
     ) -> str:
-        """Execute agent with prompt per paper (Fig.4)."""
-        bb = blackboard_public if not private else {}
+        """Execute an agent with a role-specific prompt (Fig.4)."""
+        bb = dict(blackboard_public)
+        if private:
+            bb.update(private)
+        bb_str = "\n".join(f"{k}: {v}" for k, v in bb.items())
+        sys_prompt = AGENT_PROMPTS.get(agent["role"], GENERIC_AGENT_PROMPT)
         prompt = _fmt(
-            AGENT_PROMPT_TEMPLATE,
+            sys_prompt,
             role_name=agent["role"],
             question=self._current_query,
-            bb="\n".join(bb.values()),
+            bb=bb_str,
         )
-        res = await self._hedged_solve(prompt, {"agent": agent["role"]}, timeout=20.0)
-        return res.text.strip()
+        ctx = {"llm": agent.get("llm"), "role": agent["role"]}
+        res = await self._hedged_solve(prompt, ctx, timeout=20.0)
+        msg = res.text.strip()
+        if "output" in msg:
+            data = safe_json_loads(msg)
+            msg = data.get("output", msg)
+        return msg
 
     async def blackboard_cycle(
         self,
         query: str,
         agents: List[Dict[str, str]],
         max_rounds: int = 4,
-    ) -> Dict[str, Artifact]:
-        """Iterative cycle per paper's Alg.1."""
+    ) -> Dict[str, str]:
+        """Run blackboard cycles until consensus or voting."""
         public: Dict[str, str] = {}
-        private_spaces: Dict[str, Dict[str, str]] = {}
+        private: Dict[str, Dict[str, str]] = {}
+        msg_id = 0
         for t in range(1, max_rounds + 1):
             selected = await self.control_unit_select(query, public, agents)
-            for sel_role in selected:
-                agent = next(a for a in agents if a["role"] == sel_role)
-                if agent["role"] == "conflict_resolver":
-                    msg = await self.execute_agent(agent, public)
+            for role in selected:
+                ag = next(a for a in agents if a["role"] == role)
+                if role == "conflict_resolver":
+                    msg = await self.execute_agent(ag, public)
                     conflicts = safe_json_loads(msg).get("conflict list", [])
                     if conflicts:
-                        priv_key = f"conflict_{t}_{random.randint(0,1000)}"
-                        private_spaces[priv_key] = {}
-                        for conf in conflicts:
-                            conf_agent = next(a for a in agents if a["role"] == conf["agent"])
-                            priv_msg = await self.execute_agent(conf_agent, private_spaces[priv_key], private=True)
-                            private_spaces[priv_key][conf_agent["role"]] = priv_msg
-                        resolve_msg = await self.execute_agent(agent, private_spaces[priv_key])
-                        public[f"resolved_{priv_key}"] = resolve_msg
-                elif agent["role"] == "cleaner":
-                    msg = await self.execute_agent(agent, public)
+                        space_id = f"debate_{t}_{msg_id}"
+                        private[space_id] = {}
+                        conf_agents = [next(a for a in agents if a["role"] == c["agent"]) for c in conflicts]
+                        for conf_ag in conf_agents:
+                            priv_msg = await self.execute_agent(conf_ag, public, private[space_id])
+                            private[space_id][f"{conf_ag['role']}_{msg_id}"] = priv_msg
+                            msg_id += 1
+                        resolve_msg = await self.execute_agent(ag, public, private[space_id])
+                        public[f"resolved_{space_id}_{msg_id}"] = resolve_msg
+                        msg_id += 1
+                elif role == "cleaner":
+                    msg = await self.execute_agent(ag, public)
                     clean_list = safe_json_loads(msg).get("clean list", [])
                     for cl in clean_list:
                         public.pop(cl["useless message"], None)
                 else:
-                    msg = await self.execute_agent(agent, public)
-                    public[agent["role"]] = msg
-                if agent["role"] == "decider" and "final answer" in msg.lower():
-                    break
+                    msg = await self.execute_agent(ag, public)
+                    public[f"{role}_{msg_id}"] = msg
+                    msg_id += 1
+                if role == "decider" and "final answer" in msg.lower():
+                    return public
             if t == max_rounds:
                 votes: Dict[str, str] = {}
-                for a in agents:
-                    vote_prompt = _fmt(VOTING_PROMPT, bb="\n".join(public.values()))
-                    vote = await self.execute_agent(a, public)
-                    votes[a["role"]] = vote
-                final = max(
-                    votes,
-                    key=lambda k: sum(
-                        _cosine(_hash_embed(votes[k]), _hash_embed(v))
-                        for v in votes.values()
-                        if v != votes[k]
-                    ),
-                )
-                public["final"] = votes[final]
-        return {
-            k: Artifact(node=k, content=v, qa=QAResult(ok=True), critiques=[])
-            for k, v in public.items()
-        }
+                for ag in agents:
+                    vote = await self.execute_agent(ag, public)
+                    votes[ag["role"]] = vote
+                vote_embs = {k: _hash_embed(v) for k, v in votes.items()}
+                sims = {
+                    k: sum(_cosine(vote_embs[k], vote_embs[ok]) for ok in vote_embs if ok != k)
+                    for k in votes
+                }
+                final_key = max(sims, key=sims.get)
+                public["final"] = votes[final_key]
+        return public
 
     async def _improve_until_ok(self, node: Node, initial: SolverResult, blackboard: Dict[str, Artifact], context_text: str = "") -> Artifact:
         content = initial.text
@@ -2093,16 +2110,12 @@ class Orchestrator:
         self._current_query = query
         monitor = asyncio.create_task(self.Homeostat().monitor(self))
         try:
-            experts = await self.generate_agents(query)
-            predefined = [
-                {"role": "planner", "description": "Generate plans."},
-                {"role": "decider", "description": "Decide if enough for answer."},
-                {"role": "critic", "description": "Point out errors."},
-                {"role": "cleaner", "description": "Remove useless messages."},
-                {"role": "conflict_resolver", "description": "Detect and resolve conflicts."},
-            ]
-            agents = experts + predefined
-            blackboard = await self.blackboard_cycle(query, agents)
+            agents = await self.generate_agents(query)
+            raw_bb = await self.blackboard_cycle(query, agents)
+            blackboard = {
+                k: Artifact(node=k, content=v, qa=QAResult(ok=True), critiques=[])
+                for k, v in raw_bb.items()
+            }
             try:
                 self._last_artifacts = blackboard
             except Exception:
@@ -2378,7 +2391,11 @@ async def _demo() -> None:
     print(result["final"])
 
     print("\n===== 📋 PLAN =====")
-    print(json.dumps(result["plan"], indent=2))
+    plan = result.get("plan")
+    if plan is not None:
+        print(json.dumps(plan, indent=2))
+    else:
+        print("(no plan)")
 
     print("\n===== 🧩 ARTIFACTS =====")
     for k, v in result["artifacts"].items():
