@@ -18,9 +18,9 @@ import os
 from pathlib import Path
 from typing import Dict
 
-from blackboard.orchestrator import Orchestrator, OrchestratorConfig
-from blackboard.memory import MemoryStore
-from blackboard.core import Artifact, cognitive_query_analysis_protocol
+from .orchestrator import Orchestrator, OrchestratorConfig
+from .memory import MemoryStore
+from .core import Artifact, cognitive_query_analysis_protocol
 
 _LOG = logging.getLogger("cli")
 

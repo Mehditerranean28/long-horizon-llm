@@ -1,4 +1,10 @@
-# adapters.py
+"""Adapters bridging the pipeline orchestrator and blackboard solver.
+
+The helpers in this module intentionally avoid clever abstractions.  Each
+function validates inputs and keeps output predictable so higher layers can make
+strict assumptions.  The goal is a minimal, well-commented surface area.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -28,6 +34,8 @@ MISSION_START = "<<<MISSION_JSON>>>"
 MISSION_END = "<<<END_MISSION>>>"
 
 def _embed_mission(task: str, mission_obj: dict | None) -> str:
+    """Embed a mission JSON blob inside the task string."""
+
     if not mission_obj:
         return task
     mission_json = json.dumps(mission_obj, ensure_ascii=False)
@@ -78,6 +86,8 @@ Rules:
 # --- helpers ------------------------------------------------------------------------------------
 
 def _first_json_object(text: str) -> Optional[str]:
+    """Return the first JSON object found in ``text`` or ``None``."""
+
     start = text.find("{")
     if start < 0:
         return None
@@ -103,6 +113,8 @@ def _first_json_object(text: str) -> Optional[str]:
     return None
 
 def _as_str_list(x: Any) -> List[str]:
+    """Coerce ``x`` into a list of non-empty strings."""
+
     if isinstance(x, list):
         return [str(v).strip() for v in x if str(v).strip()]
     if isinstance(x, (str, int, float)):
@@ -129,18 +141,21 @@ log.setLevel(os.getenv("LOG_LEVEL", "INFO"))
 
 @dataclass(slots=True)
 class PipelineSolver:
+    """Light wrapper around the pipeline orchestrator to match solver API."""
+
     orch: PipelineOrchestrator
     planner: Optional["PlannerLLM"] = None
     timeout_sec: int = 120
 
     async def solve(self, task: str, context: Optional[Dict[str, Any]] = None) -> str | SolverResult:
+        """Run the pipeline on ``task`` and return the final text."""
+
         if not task or not task.strip():
             raise ValueError("solve(): empty task")
 
-        # decide whether to generate a mission (always, or gated by context)
         want_mission = True
         if context and "plan_mode" in context:
-            want_mission = (context.get("plan_mode") == "mission")
+            want_mission = context.get("plan_mode") == "mission"
 
         enriched_task = task
         if want_mission and self.planner is not None:
@@ -154,10 +169,16 @@ class PipelineSolver:
         log.info("PipelineSolver[%s]: run task len=%d", cid, len(enriched_task))
         t0 = time.perf_counter()
         try:
-            result = await asyncio.wait_for(self.orch.run(enriched_task), timeout=self.timeout_sec)
+            result = await asyncio.wait_for(
+                self.orch.run(enriched_task), timeout=self.timeout_sec
+            )
         except asyncio.TimeoutError as e:
-            log.error("PipelineSolver[%s]: timeout after %ss", cid, self.timeout_sec)
-            raise RuntimeError(f"pipeline timeout after {self.timeout_sec}s") from e
+            log.error(
+                "PipelineSolver[%s]: timeout after %ss", cid, self.timeout_sec
+            )
+            raise RuntimeError(
+                f"pipeline timeout after {self.timeout_sec}s"
+            ) from e
         except Exception as e:
             log.exception("PipelineSolver[%s]: pipeline failure: %s", cid, e)
             raise RuntimeError(f"pipeline failure: {e}") from e
@@ -166,7 +187,9 @@ class PipelineSolver:
         if isinstance(final_field, SolverResult):
             final = (final_field.text or "").strip()
         elif isinstance(final_field, dict):
-            final = str(final_field.get("text") or final_field.get("content") or "").strip()
+            final = str(
+                final_field.get("text") or final_field.get("content") or ""
+            ).strip()
         else:
             final = str(final_field or "").strip()
         if not final:
@@ -178,6 +201,8 @@ class PipelineSolver:
 # --- Planner ------------------------------------------------------------------------------------
 
 def _heuristic_mission_from_query(query: str) -> Dict[str, Any]:
+    """Fallback mission plan when the planner fails to produce one."""
+
     q = (query or "").strip()
     return {
         "query_context": q,
@@ -222,6 +247,8 @@ def _heuristic_mission_from_query(query: str) -> Dict[str, Any]:
     }
 
 def _normalize_mission(obj: Dict[str, Any], query: str) -> Dict[str, Any]:
+    """Normalize mission JSON to the expected shape."""
+
     if not isinstance(obj, dict):
         return _heuristic_mission_from_query(query)
 
@@ -300,12 +327,16 @@ class PlannerLLM:
     timeout_sec: int = 45
 
     async def _ask(self, content: str, temperature: float = 0.0) -> str:
+        """Call the underlying LLM with a firm timeout."""
+
         return await asyncio.wait_for(
             self.llm.complete(content, temperature=temperature, timeout=self.timeout_sec),
             timeout=self.timeout_sec + 5,
         )
 
     def _normalize_dag(self, obj: Dict[str, Any]) -> Dict[str, Any]:
+        """Sanitize a planner DAG structure into canonical form."""
+
         triage = str(obj.get("triage", "")).strip().lower()
         if triage not in {"atomic", "composite", "hybrid"}:
             triage = "atomic"
@@ -349,17 +380,21 @@ class PlannerLLM:
         return {"triage": triage, "nodes": nodes, "stitch": {"sections": sections}}
 
     async def complete(self, prompt: str, *, temperature: float = 0.0, timeout: float = 60.0) -> str:
+        """Proxy to the underlying LLM with bounded timeout."""
+
         return await asyncio.wait_for(
-            self.llm.complete(prompt, temperature=temperature, timeout=min(timeout, self.timeout_sec)),
+            self.llm.complete(
+                prompt, temperature=temperature, timeout=min(timeout, self.timeout_sec)
+            ),
             timeout=(min(timeout, self.timeout_sec) + 5),
         )
 
     async def plan(self, query: str, mode: str = "dag") -> Dict[str, Any]:
-        """
-        Plan a query into either a DAG ('dag') or a mission-plan ('mission').
-        'mission' is normalized to match blackboard.build_plan_from_mission().
-        """
-        prompt = (_MISSION_PLANNER_PROMPT if mode == "mission" else _PLANNER_SYSTEM_PROMPT) + "\n\nQUERY:\n" + query
+        """Plan ``query`` into a DAG or mission-plan."""
+
+        prompt = (
+            _MISSION_PLANNER_PROMPT if mode == "mission" else _PLANNER_SYSTEM_PROMPT
+        ) + "\n\nQUERY:\n" + query
         raw = await self._ask(prompt, temperature=0.0)
 
         try:

@@ -1,8 +1,11 @@
-# server.py
+"""FastAPI server for the reasoning pipeline.
 
-# =======================================
-# Reasoning Pipeline API — Server
-# =======================================
+This module exposes a HTTP interface around the orchestrator.  The code favours
+clarity and defensive checks over cleverness; every external boundary validates
+inputs and fails closed.  The module is intentionally lean so each component is
+auditable and easily testable.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -13,12 +16,13 @@ import re
 import sys
 import time
 import uuid
+import json
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional, Type, Callable, Awaitable
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, constr, field_validator
 
 
@@ -45,7 +49,9 @@ except Exception as e:
 log = logging.getLogger("server")
 if not log.handlers:
     handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    )
     log.addHandler(handler)
 log.setLevel(os.getenv("LOG_LEVEL", "INFO"))
 
@@ -59,7 +65,17 @@ GUIDELINES = os.getenv(
     "Be terse, precise, and fully actionable. Prefer explicit base conditions, tests, and complexity.",
 )
 
-CORS_ALLOW_ORIGINS = [o for o in os.getenv("CORS_ALLOW_ORIGINS", "http://localhost,http://localhost:3000").split(",") if o]
+CORS_ALLOW_ORIGINS = [
+    o
+    for o in os.getenv(
+        "CORS_ALLOW_ORIGINS", "http://localhost,http://localhost:3000"
+    ).split(",")
+    if o
+]
+
+# Toggle streaming endpoint exposure; disabling avoids dangling routes when
+# event-stream consumers are unwanted or unsupported in a deployment.
+ENABLE_STREAM_ENDPOINT = bool(int(os.getenv("ENABLE_STREAM_ENDPOINT", "1")))
 
 
 LLM_CLASS_PATH = os.getenv("LLM_CLASS", "").strip()
@@ -70,6 +86,8 @@ except Exception as e:
     raise
 
 class RunRequest(BaseModel):
+    """Request payload for ``/v1/run``."""
+
     query: constr(min_length=1)
 
     @field_validator("query")
@@ -82,6 +100,8 @@ class RunRequest(BaseModel):
         return v.strip()
 
 class RunResponse(BaseModel):
+    """Response body for ``/v1/run``."""
+
     request_id: str
     duration_ms: int
     meta: Dict[str, Any]
@@ -91,57 +111,76 @@ class RunResponse(BaseModel):
     final: str
 
 class HealthResponse(BaseModel):
+    """Simple health status."""
+
     status: str = "ok"
     version: str = APP_VERSION
 
 class TemplatesResponse(BaseModel):
+    """Available cognitive (A) and reasoning (R) templates."""
+
     A: List[str]
     A_details: Dict[str, Dict[str, Any]]
     R: List[str]
     R_details: Dict[str, Dict[str, Any]]
 
 class ErrorResponse(BaseModel):
+    """Standardised error payload."""
+
     detail: str
     correlation_id: str
 
 class GenAIRequest(BaseModel):
+    """Request payload for ``/v1/genai``."""
+
     prompt: constr(min_length=1)
     temperature: float = Field(0.0, ge=0.0, le=2.0)
     timeout: float = Field(30.0, ge=0.5, le=120.0)
 
 class GenAIResponse(BaseModel):
+    """Response body for ``/v1/genai``."""
+
     request_id: str
     duration_ms: int
     output: str
 
 
 def _ensure_request_id(x_request_id: Optional[str] = Header(default=None)) -> str:
+    """Return a request id, generating one when absent."""
+
     return x_request_id or str(uuid.uuid4())
 
 def _load_llm_class(path: str) -> Optional[Type[Any]]:
+    """Import and return a class from ``module:Class`` notation.
+
+    Returns ``None`` when the environment variable is unset or malformed.  Any
+    import error is logged and results in ``None`` so the caller can fall back to
+    a default implementation.
+    """
+
     if not path or ":" not in path:
         return None
     mod_name, class_name = path.split(":", 1)
     try:
         mod = importlib.import_module(mod_name)
-        cls = getattr(mod, class_name)
-        return cls  # may raise on instantiation later; duck-typed
-    except Exception as e:
+        return getattr(mod, class_name)
+    except Exception as e:  # pragma: no cover - best effort logging
         log.error("Failed to import LLM class '%s': %s", path, e)
         return None
 
 def _instantiate_llm() -> LLM:
+    """Instantiate the configured LLM or a ``MockLLM`` as fallback."""
+
     cls = _load_llm_class(LLM_CLASS_PATH)
     if cls is None:
         log.info("Using default MockLLM (set LLM_CLASS to override)")
         return MockLLM()
     try:
         obj = cls(**LLM_INIT_KW)  # type: ignore[call-arg]
-        # Duck-typing sanity check
         if not hasattr(obj, "complete"):
             raise TypeError("Provided LLM lacks 'complete' method")
         return obj  # type: ignore[return-value]
-    except Exception as e:
+    except Exception as e:  # pragma: no cover - requires misconfiguration
         log.critical("LLM instantiation failed for %s: %s", cls, e)
         raise
 
@@ -156,16 +195,18 @@ app = FastAPI(
 ORCH: Optional[Orchestrator] = None
 
 @app.middleware("http")
-async def request_context_mw(request: Request, call_next):
+async def request_context_mw(request: Request, call_next: Callable[[Request], Awaitable[Response]]):
+    """Attach a request id and log timing for every request."""
+
     request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
     start = time.perf_counter()
     try:
         response: Response = await call_next(request)
-    except Exception as e:
-        raise
     finally:
         dur_ms = int((time.perf_counter() - start) * 1000)
-        log.info("HTTP %s %s %dms rid=%s", request.method, request.url.path, dur_ms, request_id)
+        log.info(
+            "HTTP %s %s %dms rid=%s", request.method, request.url.path, dur_ms, request_id
+        )
     response.headers["x-request-id"] = request_id
     return response
 
@@ -180,6 +221,8 @@ app.add_middleware(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Initialise and tear down the global orchestrator."""
+
     global ORCH
     llm = _instantiate_llm()
 
@@ -217,6 +260,8 @@ app.router.lifespan_context = lifespan
 
 @app.exception_handler(ValidationError)
 async def pydantic_exc_handler(request: Request, exc: ValidationError):
+    """Return a structured error for Pydantic validation issues."""
+
     cid = request.headers.get("x-request-id") or str(uuid.uuid4())
     return JSONResponse(
         status_code=422,
@@ -225,6 +270,8 @@ async def pydantic_exc_handler(request: Request, exc: ValidationError):
 
 @app.exception_handler(Exception)
 async def global_exc_handler(request: Request, exc: Exception):
+    """Catch-all exception handler returning a generic error payload."""
+
     cid = request.headers.get("x-request-id") or str(uuid.uuid4())
     log.error("Unhandled error rid=%s: %s", cid, exc, exc_info=True)
     return JSONResponse(
@@ -235,19 +282,31 @@ async def global_exc_handler(request: Request, exc: Exception):
 
 @app.get("/", include_in_schema=False)
 async def root() -> Dict[str, Any]:
+    """Basic service metadata."""
+
     return {
         "name": APP_NAME,
         "version": APP_VERSION,
         "docs": "/docs",
-        "endpoints": ["/health", "/v1/templates", "/v1/run", "/v1/genai"],
+        "endpoints": [
+            "/health",
+            "/v1/templates",
+            "/v1/run",
+            *(["/v1/run/stream"] if ENABLE_STREAM_ENDPOINT else []),
+            "/v1/genai",
+        ],
     }
 
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
+    """Liveness probe."""
+
     return HealthResponse(status="ok", version=APP_VERSION)
 
 @app.get("/v1/templates", response_model=TemplatesResponse)
 async def templates() -> TemplatesResponse:
+    """Expose available templates to clients."""
+
     return TemplatesResponse(
         A=list(A_TEMPLATES.keys()),
         A_details=A_TEMPLATES,
@@ -260,6 +319,8 @@ async def run_endpoint(
     req: RunRequest,
     x_request_id: str = Depends(_ensure_request_id),
 ) -> RunResponse:
+    """Execute the reasoning pipeline for a query."""
+
     if ORCH is None:
         raise HTTPException(status_code=503, detail="Orchestrator not ready")
     t0 = time.perf_counter()
@@ -285,11 +346,36 @@ async def run_endpoint(
         final=final_text,
     )
 
+
+@app.post("/v1/run/stream")
+async def run_stream_endpoint(
+    req: RunRequest,
+    x_request_id: str = Depends(_ensure_request_id),
+):
+    """Stream milestone events for a query as newline-delimited JSON."""
+    if not ENABLE_STREAM_ENDPOINT:
+        raise HTTPException(status_code=404, detail="Streaming disabled")
+
+    if ORCH is None:
+        raise HTTPException(status_code=503, detail="Orchestrator not ready")
+
+    async def event_gen():
+        try:
+            async for event in ORCH.run_stream(req.query):
+                yield json.dumps(event) + "\n"
+        except Exception as e:
+            log.exception("rid=%s stream failure: %s", x_request_id, e)
+            yield json.dumps({"type": "error", "error": str(e)}) + "\n"
+
+    return StreamingResponse(event_gen(), media_type="application/x-ndjson")
+
 @app.post("/v1/genai", response_model=GenAIResponse)
 async def genai_endpoint(
     req: GenAIRequest,
     x_request_id: str = Depends(_ensure_request_id),
 ) -> GenAIResponse:
+    """Direct access to the underlying LLM/planner."""
+
     if ORCH is None:
         raise HTTPException(status_code=503, detail="Orchestrator not ready")
     t0 = time.perf_counter()

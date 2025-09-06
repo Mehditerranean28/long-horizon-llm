@@ -17,6 +17,12 @@ A policy-driven reasoning orchestrator that takes any query and runs it through 
 
 > Core design values: explainability (meta, plan, artifacts), quality gating (critics/judges), parallelism (layered topo), policy control (selectors & precision), and eventually auditability (provenance, budgets, logs).
 
+## Repository layout
+
+- `backend/`: FastAPI server, pipeline logic, and a lean `blackboard.py` module used in tests and production.
+- `backend/blackboard_pkg/`: experimental, feature-rich blackboard engine kept for reference.
+- `frontend/`: Next.js client that communicates with the backend API.
+
 
 # Blackboard
 
