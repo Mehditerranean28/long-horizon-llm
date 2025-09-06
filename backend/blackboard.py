@@ -8,6 +8,8 @@ import logging
 import hashlib
 import math
 import heapq
+import random
+import statistics
 import uuid
 import os
 import re
@@ -426,6 +428,10 @@ class MemoryStore:
                 if not isinstance(ev, list) or not ev:
                     continue
                 sim = _cosine(qv, ev)
+                sim -= 0.05 * entry.get("penalty", 0)
+                for subj in (entry.get("contradictions") or []):
+                    if isinstance(subj, str) and subj.lower() in query.lower():
+                        sim -= 0.1
                 if sim >= min_sim:
                     if len(heap) < top_k:
                         heapq.heappush(heap, (sim, sig, entry))
@@ -1245,13 +1251,18 @@ JUDGES.register(BrevityJudge())
 class LLMJudge:
     name: str = "llm-judge"
     solver: Optional[BlackBoxSolver] = None
-    async def critique(self, text: str, contract: Contract) -> Critique:
+    async def critique(
+        self, text: str, contract: Contract, *, temperature: float = 0.0, seed: Optional[int] = None
+    ) -> Critique:
         if self.solver is None:
             return Critique(score=0.7, comments=LLM_JUDGE_UNAVAILABLE, guidance={"structure":0.0,"brevity":0.0,"evidence":0.0})
         prompt = _fmt(LLM_JUDGE_PROMPT, text=text, contract=json.dumps(contract.format))
         try:
             async with GLOBAL_LIMITER.slot():
-                res = await asyncio.wait_for(self.solver.solve(prompt, context={"mode":"judge"}), timeout=15.0)
+                ctx = {"mode": "judge", "temperature": temperature}
+                if seed is not None:
+                    ctx["seed"] = seed
+                res = await asyncio.wait_for(self.solver.solve(prompt, context=ctx), timeout=15.0)
             raw = res.text if isinstance(res, SolverResult) else str(res)
             data = json.loads(_first_json_object(raw) or "{}")
             score = max(0.0, min(1.0, float(data.get("score", 0.7))))
@@ -1327,6 +1338,7 @@ class OrchestratorConfig:
     use_llm_cqap: bool = bool(int(os.getenv("USE_LLM_CQAP", "1")))
     plan_from_meta: bool = bool(int(os.getenv("PLAN_FROM_META", "1")))
     use_llm_classifier: bool = bool(int(os.getenv("USE_LLM_CLASSIFIER", "1")))
+    ensemble_mode: bool = bool(int(os.getenv("ENSEMBLE_MODE", "1")))
 
 @dataclass(slots=True)
 class Orchestrator:
@@ -1424,22 +1436,30 @@ class Orchestrator:
         judges = self.judges or JUDGES.get_all()
         async def _one(j: Judge) -> Critique:
             try:
-                # Noise-resilient ensemble for LLM judges
-                if isinstance(j, LLMJudge):
-                    c1 = await asyncio.wait_for(j.critique(text, contract), timeout=self.config.judge_timeout_sec)
-                    c2 = await asyncio.wait_for(j.critique(text, contract), timeout=self.config.judge_timeout_sec)
-                    if abs(c1.score - c2.score) > 0.3:
-                        # choose closer to neutral baseline; avoid referencing outer results
-                        base = 0.7
-                        return c1 if abs(c1.score - base) <= abs(c2.score - base) else c2
-                    # average if consistent
-                    return Critique(score=(c1.score + c2.score) / 2.0,
-                                    comments=(c1.comments or "")[:200] or c2.comments,
-                                    guidance={
-                                        "structure": (c1.guidance.get("structure",0.0)+c2.guidance.get("structure",0.0))/2.0,
-                                        "brevity": (c1.guidance.get("brevity",0.0)+c2.guidance.get("brevity",0.0))/2.0,
-                                        "evidence": (c1.guidance.get("evidence",0.0)+c2.guidance.get("evidence",0.0))/2.0,
-                                    })
+                if isinstance(j, LLMJudge) and self.config.ensemble_mode:
+                    temps = [0.3, 0.6, 0.9]
+                    crits: List[Critique] = []
+                    for t in temps:
+                        seed = random.randint(0, 10_000_000)
+                        crit = await asyncio.wait_for(
+                            j.critique(text, contract, temperature=t, seed=seed),
+                            timeout=self.config.judge_timeout_sec,
+                        )
+                        crits.append(crit)
+                    scores = [c.score for c in crits]
+                    try:
+                        qs = statistics.quantiles(scores, n=4)
+                        q1, q3 = qs[0], qs[2]
+                        iqr = q3 - q1
+                        low, high = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+                        filtered = [c for c in crits if low <= c.score <= high]
+                    except Exception:
+                        filtered = crits
+                    if not filtered:
+                        filtered = crits
+                    median_score = statistics.median([c.score for c in filtered])
+                    median_crit = min(filtered, key=lambda c: abs(c.score - median_score))
+                    return Critique(score=median_score, comments=median_crit.comments, guidance=median_crit.guidance)
                 return await asyncio.wait_for(j.critique(text, contract), timeout=self.config.judge_timeout_sec)
             except Exception as e:
                 _LOG.warning("judge '%s' failed: %s", getattr(j, "name", "unknown"), e)
@@ -1453,7 +1473,8 @@ class Orchestrator:
                 _LOG.warning("judge '%s' raised: %s", getattr(j, "name", "unknown"), r)
                 results.append(Critique(score=0.7, comments=JUDGE_EXCEPTION_MSG, guidance={"structure":0.0,"brevity":0.0,"evidence":0.0}))
         for j, c in zip(judges, results):
-            delta = (c.score - 0.7) * 0.1; self.memory.bump_judge(getattr(j, "name", "unknown"), delta)
+            delta = (c.score - 0.7) * 0.1
+            self.memory.bump_judge(getattr(j, "name", "unknown"), delta)
         self.memory.save()
         return results
 
@@ -1465,16 +1486,31 @@ class Orchestrator:
         mean = sum(scores) / len(scores)
         var = sum((s - mean) ** 2 for s in scores) / len(scores)
         stddev = math.sqrt(var)
-        if stddev < 0.15:
-            return mean
-        # check for >= 2/3 agreement
-        for s in set(round(sc, 2) for sc in scores):
-            if scores.count(s) / len(scores) >= (2 / 3):
-                return s
-        # fallback weighted average
         judges = self.judges or JUDGES.get_all()
-        w = [self.memory.get_judge_weight(getattr(j, "name", "unknown")) for j in judges]
-        return sum(c.score * ww for c, ww in zip(critiques, w)) / (sum(w) or 1.0)
+        weights = [self.memory.get_judge_weight(getattr(j, "name", "unknown")) for j in judges]
+        if stddev < 0.15:
+            final = mean
+        else:
+            final = None
+            for s in set(round(sc, 2) for sc in scores):
+                if scores.count(s) / len(scores) >= (2 / 3):
+                    final = s
+                    break
+            if final is None:
+                final = sum(c.score * w for c, w in zip(critiques, weights)) / (sum(weights) or 1.0)
+        deliberation_log: Dict[str, Any] = {}
+        for j, c, w in zip(judges, critiques, weights):
+            name = getattr(j, "name", "unknown")
+            vote = "up" if c.score >= final else "down"
+            deliberation_log[name] = {"score": c.score, "weight": w, "vote": vote}
+            delta = 0.01 if abs(c.score - final) <= 0.1 else -0.01
+            self.memory.bump_judge(name, delta)
+        try:
+            _AUDIT.info(json.dumps({"deliberation": deliberation_log}, ensure_ascii=False))
+        except Exception:
+            pass
+        self.memory.save()
+        return final
 
     class Homeostat:
         async def monitor(self, orch: "Orchestrator") -> None:
@@ -1495,7 +1531,13 @@ class Orchestrator:
                         continue
             except asyncio.CancelledError:
                 # Graceful shutdown on cancel
-                return
+                pass
+
+        def adjust(self, orch: "Orchestrator") -> None:
+            if orch.config.concurrent > 1:
+                orch.config.concurrent -= 1
+            else:
+                orch.config.min_score = min(0.95, orch.config.min_score + 0.05)
 
     def _build_context(self, node: Node, blackboard: Dict[str, Artifact], token_budget: int = 800) -> str:
         """Concise pack of dependency artifacts; trimmed to ~token_budget."""
@@ -1615,6 +1657,10 @@ class Orchestrator:
                                           "issues": [i.code for i in qa.issues],
                                           "scores": [c.score for c in crits]})
                 # Judges are advisory; if QA passes, accept the section
+                try:
+                    self.stability_check()
+                except Exception:
+                    pass
                 return Artifact(node=node.name, content=content, qa=qa, critiques=crits)
             patches = [p for issue in qa.issues for p in issue.suggested]
             if patches:
@@ -1640,6 +1686,10 @@ class Orchestrator:
                 _LOG.exception("solver improve failed (node=%s): %s", node.name, e)
                 if self.config.qa_hard_fail: raise ExecutionError(f"solver failed for {node.name}: {e}")
                 break
+            try:
+                self.stability_check()
+            except Exception:
+                pass
         qa = run_tests(content, node.contract)
         crits = await self._run_judges(content, node.contract)
         # Only QA gates acceptance; persist best-effort content either way
@@ -1676,6 +1726,10 @@ class Orchestrator:
                 self._score_history[:] = self._score_history[-50:]
             except Exception:
                 pass
+        try:
+            self.stability_check()
+        except Exception:
+            pass
         if self.on_node_complete:
             try: await self.on_node_complete(art)
             except Exception as e: _LOG.warning("on_node_complete callback failed: %s", e)
@@ -1932,6 +1986,13 @@ class Orchestrator:
             arts = list(blackboard.values())
             conflicts = detect_cross_contradictions(arts)
             resolution = await draft_resolution(self.solver, conflicts, blackboard) if conflicts else ""
+            subjects = sorted({s for _, _, s in conflicts}) if conflicts else []
+            if conflicts:
+                for _ in subjects:
+                    try:
+                        self.memory.penalize_kline(sig)
+                    except Exception:
+                        pass
             final = self._compose(plan, blackboard, include_resolution=resolution)
 
             global_recs, final_cohesive = await self._cohesion_pass(query, final, conflicts, resolution)
@@ -1966,6 +2027,7 @@ class Orchestrator:
                         "ok_nodes": [k for k, v in blackboard.items() if v.status == "ok"],
                         "global_recs": global_recs[:8],
                         "run": run_id,
+                        "contradictions": subjects,
                     },
                     query=query,
                     classification={"kind": cls.kind, "score": cls.score},
@@ -2034,33 +2096,37 @@ class Orchestrator:
         return (ma + s) / 2.0
 
     def stability_check(self) -> bool:
-        """
-        Lyapunov-style energy: E = (pending_tokens / max_tokens) + (1 - avg_score_pred).
-        Ensure E decreases; otherwise tighten controls.
-        """
+        """Lyapunov-style stability metric."""
         max_tokens = max(1, self.config.max_tokens_per_run)
-        pending = max(0, max_tokens - self._tokens_used)
-        avg_score_pred = self.predict_quality(self._score_history)
-        energy = (pending / max_tokens) + (1.0 - avg_score_pred)
-        decreased = True if self._last_energy is None else (energy < (self._last_energy - 1e-6))
-        action = {}
-        if not decreased:
-            # tighten: reduce concurrency or raise min_score
-            new_conc = max(1, self.config.concurrent - 1)
-            new_min = min(0.95, self.config.min_score + 0.02)
-            action = {"concurrent_old": self.config.concurrent, "concurrent_new": new_conc,
-                      "min_score_old": self.config.min_score, "min_score_new": new_min}
-            self.config.concurrent = new_conc
-            self.config.min_score = new_min
+        used = min(self._tokens_used, max_tokens)
+        avg_score = sum(self._score_history) / len(self._score_history) if self._score_history else 1.0
+        arts = getattr(self, "_last_artifacts", {}) or {}
+        failures = sum(1 for a in arts.values() if getattr(a, "status", "") != "ok")
+        total = len(arts) or 1
+        failure_rate = failures / total
+        alpha, beta, gamma = 0.4, 0.4, 0.2
+        energy = alpha * (used / max_tokens) + beta * (1 - avg_score) + gamma * failure_rate
+        unstable = False
+        if self._last_energy is not None and energy > self._last_energy + 1e-6:
+            unstable = True
+            try:
+                self.Homeostat().adjust(self)
+            except Exception:
+                pass
         self._last_energy = energy
         try:
-            _AUDIT.info(json.dumps({"stability_check":{
-                "run_id": self.run_id, "energy": round(energy,4), "avg_score_pred": round(avg_score_pred,4),
-                "tokens_used": self._tokens_used, "max_tokens": max_tokens, "decreased": decreased, "action": action
+            _AUDIT.info(json.dumps({"stability_trace": {
+                "run_id": self.run_id,
+                "energy": round(energy, 4),
+                "avg_score": round(avg_score, 4),
+                "used_tokens": used,
+                "max_tokens": max_tokens,
+                "failure_rate": round(failure_rate, 4),
+                "unstable": unstable
             }}, ensure_ascii=False))
         except Exception:
             pass
-        return decreased
+        return not unstable
 
 class EchoSolver:
     """Trivial echo solver (for demo & testing)."""
