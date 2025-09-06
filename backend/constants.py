@@ -227,6 +227,7 @@ AGENT_PROMPTS = {
         "You are conflict_resolver. Find conflicting messages and return JSON {\"conflict list\": [{\"agent\": role}]}.\nBlackboard:\n{bb}"
     ),
 }
+
 VOTING_PROMPT = "Based on blackboard, give your answer... "
 
 

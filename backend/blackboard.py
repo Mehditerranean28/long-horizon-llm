@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
-try:  # Add for forecasting; assume available or pip-install.
-    import numpy as np
-except Exception:  # pragma: no cover - fallback when NumPy missing
-    np = None
+
+import numpy as np
 import asyncio
 import json
 import logging
 import hashlib
 import math
 import heapq
-import random  # For LLM selection per paper.
+import random
 import statistics
 import uuid
 import os
