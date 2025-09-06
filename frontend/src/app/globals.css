@@ -1,0 +1,969 @@
+/*
+ * @tailwind base;
+ * @tailwind components;
+ * @tailwind utilities;
+ *
+ * This file defines the core global styles and theming for the application.
+ * It leverages Tailwind CSS's `@apply` directives and CSS Custom Properties (variables)
+ * to create a highly flexible and maintainable theming system.
+ *
+ * Each theme defines a set of HSL color values for various UI components,
+ * ensuring consistency and easy customization.
+ *
+ * Variables are grouped semantically:
+ * - Core Colors: background, foreground, card, primary, secondary, accent, destructive, border, input, ring.
+ * - Chart Colors: chart-1 through chart-5 for consistent data visualization palettes.
+ * - Radius: Controls the global border-radius.
+ *
+ * The sidebar-specific variables are globally derived from the core theme variables,
+ * preventing repetition and ensuring sidebar styling adapts automatically to the active theme.
+ */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /*
+   * --- Core Theme Definitions ---
+   * Each CSS selector defines a theme's color palette using HSL values.
+   * HSL format: Hue (0-360) Saturation (0-100%) Lightness (0-100%).
+   * This structure allows for easy manipulation and understanding of color relationships.
+   */
+
+  :root {
+    /*
+     * Default Theme: Ultra White (Light Mode)
+     * A clean, minimalist light theme with high contrast.
+     * Predominantly uses a white background with dark text,
+     * subtle greys for cards and muted elements, and a dark blue primary color.
+     */
+    --background: 0 0% 100%;       /* white */
+    --foreground: 0 0% 3.9%;       /* near black */
+    --card: 0 0% 96.1%;            /* very light grey */
+    --card-foreground: 0 0% 3.9%;
+    --popover: 0 0% 96.1%;
+    --popover-foreground: 0 0% 3.9%;
+    --primary: 222.2 47.4% 11.2%;  /* dark blue */
+    --text-primary: 0 0% 0%;       /* default text-primary color */
+    --primary-foreground: 0 0% 98%; /* light text on primary */
+    --secondary: 0 0% 94.1%;       /* light grey */
+    --secondary-foreground: 0 0% 9%; /* darker grey */
+    --muted: 0 0% 94.1%;
+    --muted-foreground: 0 0% 45.1%; /* medium grey */
+    --accent: 210 40% 96.1%;       /* very light blue for subtle accents */
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;  /* standard red */
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 89.8%;          /* light grey border */
+    --input: 0 0% 89.8%;           /* Default input border */
+    --ring: 215 20.2% 65.1%;       /* for focus rings */
+
+    /* Input-specific background and text colors (derived from main theme) */
+    --input-background: var(--background);
+    --input-foreground: var(--foreground);
+    --input-placeholder: var(--muted-foreground);
+
+    /* Chart colors - specific for default theme */
+    --chart-1: 220 70% 50%;
+    --chart-2: 160 60% 45%;
+    --chart-3: 30 80% 55%;
+    --chart-4: 280 65% 60%;
+    --chart-5: 340 75% 55%;
+
+    --radius: 0.5rem; /* Default border radius */
+
+    /* ----------  GLOBAL UTILITY TOKENS  ------------------------ */
+    --shadow-sm: 0 1px 2px hsl(0 0% 0% / 0.15);
+    --shadow-lg: 0 4px 16px hsl(0 0% 0% / 0.25);
+  }
+
+  .dark {
+    /*
+     * Default Dark Theme
+     * A deep, modern dark theme with light text for readability.
+     * Uses dark charcoal backgrounds, light grey foregrounds, and
+     * reverses primary/foreground for interactive elements.
+     */
+    --background: 240 10% 3.9%;
+    --foreground: 0 0% 98%;
+    --card: 240 10% 3.9%;
+    --card-foreground: 0 0% 98%;
+    --popover: 240 10% 3.9%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 0 0% 98%;
+    --primary-foreground: 240 10% 9%;
+    --secondary: 240 5% 14.9%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 240 5% 14.9%;
+    --muted-foreground: 0 0% 63.9%;
+    --accent: 240 5% 20%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 5% 14.9%;
+    --input: 240 5% 14.9%;
+    --ring: 0 0% 83.1%;
+
+    --input-background: var(--card); /* Inputs typically match card background in dark themes */
+    --input-foreground: var(--card-foreground);
+    --input-placeholder: var(--muted-foreground);
+
+    --chart-1: 220 70% 50%;
+    --chart-2: 160 60% 45%;
+    --chart-3: 30 80% 55%;
+    --chart-4: 280 65% 60%;
+    --chart-5: 340 75% 55%;
+
+    --radius: 0.5rem;
+  }
+
+  .theme-dune {
+    /*
+     * Theme: Dune (Arrakis / Desert-inspired)
+     * A dark, earthy theme inspired by desert landscapes and sci-fi aesthetics.
+     * Features muted greens and browns with accents of desaturated grey-green.
+     * Utilizes a higher border-radius for a slightly softer feel.
+     */
+    --background: 150 8% 6%;       /* Deep greenish-brown */
+    --foreground: 150 9% 51%;      /* Muted greenish-grey text */
+    --card: 150 12% 14%;           /* Darker greenish-brown for surfaces */
+    --card-foreground: 150 9% 51%;
+    --popover: var(--card);
+    --popover-foreground: var(--card-foreground);
+    --primary: 151 9% 62%;         /* Desaturated green-grey for interactive elements */
+    --primary-foreground: 150 8% 6%; /* Dark text on primary */
+    --secondary: 150 12% 37%;      /* Medium greenish-brown for secondary accents */
+    --secondary-foreground: 0 0% 100%; /* White for contrast */
+    --muted: 152 9% 25%;           /* Darker muted green */
+    --muted-foreground: 150 9% 51%;
+    --accent: 151 9% 62%;          /* Same as primary for consistent highlighting */
+    --accent-foreground: 150 8% 6%;
+    --destructive: 0 84.2% 60.2%;  /* Standard red for errors */
+    --destructive-foreground: 0 0% 98%;
+    --border: 150 12% 19%;         /* Greenish-brown border */
+    --input: var(--border);
+    --ring: var(--primary);
+
+    --input-background: var(--card); /* Inputs match card background */
+    --input-foreground: var(--card-foreground);
+    --input-placeholder: var(--muted-foreground);
+
+    --chart-1: 151 9% 62%;
+    --chart-2: 150 12% 37%;
+    --chart-3: 150 9% 51%;
+    --chart-4: 152 9% 25%;
+    --chart-5: 150 12% 19%;
+
+    --radius: 0.75rem;
+  }
+
+  .theme-dow {
+    /*
+     * Theme: DOW (Data on Wire / CRT Monitor)
+     * A retro, low-fidelity theme inspired by old CRT displays and data terminals.
+     * Features a dark background with prominent neon green for foreground and primary elements.
+     * Accents include blue for secondary and a touch of amber.
+     * Smaller radius for sharper, pixel-like aesthetics.
+     */
+    --background: 90 47% 8%;       /* Deep dark green */
+    --foreground: 90 50% 50%;      /* Bright green text */
+    --card: 90 25% 13%;            /* Darker green for surfaces */
+    --card-foreground: var(--foreground);
+    --popover: var(--card);
+    --popover-foreground: var(--foreground);
+    --primary: 86 61% 58%;         /* Lighter, brighter green for interactive elements */
+    --primary-foreground: 90 47% 8%; /* Dark text on primary */
+    --secondary: 203 43% 45%;      /* Muted blue for secondary */
+    --secondary-foreground: 0 0% 100%; /* White for contrast */
+    --muted: 90 33% 10%;           /* Slightly lighter dark green for muted */
+    --muted-foreground: 90 50% 40%;
+    --accent: 49 50% 50%;          /* Amber/yellow accent */
+    --accent-foreground: 90 47% 8%;
+    --destructive: 0 33% 54%;      /* Muted red for errors */
+    --destructive-foreground: 0 0% 100%;
+    --border: 90 33% 12%;          /* Dark green border */
+    --input: var(--card);          /* Input background is explicitly card-like */
+    --ring: var(--primary);
+
+    --input-background: var(--card); /* Inputs match card background */
+    --input-foreground: var(--foreground);
+    --input-placeholder: var(--muted-foreground);
+
+    --chart-1: var(--primary);
+    --chart-2: var(--secondary);
+    --chart-3: var(--accent);
+    --chart-4: 90 50% 35%;
+    --chart-5: 203 43% 30%;
+
+    --radius: 0.3rem;
+  }
+
+  .theme-matrix {
+    /*
+     * Theme: Matrix (Cyber-Chic)
+     * A slick, dark theme inspired by the Matrix aesthetic.
+     * Features deep black backgrounds with vivid green and subtle highlights.
+     * Sharp corners for a more futuristic, angular feel.
+     */
+    --background: 0 0% 4%;         /* Near-black background */
+    --foreground: 120 100% 65%;    /* Deeper matrix green text */
+    --card: 0 0% 6%;               /* Slightly lighter dark for cards */
+    --card-foreground: 120 100% 65%;
+    --popover: 0 0% 6%;
+    --popover-foreground: 120 100% 65%;
+    --primary: 120 100% 45%;       /* Darker neon green */
+    --primary-foreground: 0 0% 2%; /* Very dark text on primary */
+    --secondary: 120 100% 25%;     /* Muted green for secondary */
+    --secondary-foreground: 150 100% 95%; /* Light green text on secondary */
+    --muted: 0 0% 8%;              /* Slightly lighter dark for muted elements */
+    --muted-foreground: 120 100% 50%;
+    --accent: 120 100% 45%;        /* Same as primary for accent glow */
+    --accent-foreground: 0 0% 2%;
+    --destructive: 0 100% 62%;     /* Bright red for destructive actions */
+    --destructive-foreground: 0 0% 100%;
+    --border: 120 100% 25%;        /* Greenish border */
+    --input: 0 0% 5%;              /* Very dark for inputs, placeholder uses secondary */
+    --ring: 120 100% 45%;
+
+    --input-background: var(--input); /* Inputs use explicit input var for background */
+    --input-foreground: var(--foreground);
+    --input-placeholder: var(--muted-foreground);
+
+    --chart-1: 159 100% 50%;
+    --chart-2: 150 100% 25%;
+    --chart-3: 120 100% 62%;
+    --chart-4: 0 100% 62%;
+    --chart-5: 150 80% 40%;
+
+    --radius: 0.375rem;
+  }
+
+  .theme-tron {
+    /*
+     * Theme: Tron Legacy
+     * Inspired by the classic Tron film's iconic blue and yellow neon glow.
+     * Features a dark, almost black background with glowing blues, yellows, and magentas.
+     * Slightly rounded corners to complement the futuristic aesthetic.
+     */
+    --background: 213 15% 5%;      /* Dark blue-grey background */
+    --foreground: 208 25% 78%;     /* Light blue-grey text */
+    --card: 213 20% 10%;           /* Dark blue-grey for surfaces */
+    --card-foreground: var(--foreground);
+    --popover: var(--card);
+    --popover-foreground: var(--foreground);
+    --primary: 185 47% 52%;        /* Tron-bluegreen for primary interactive elements */
+    --primary-foreground: 0 0% 0%; /* Black text on primary */
+    --secondary: 42 72% 60%;       /* Tron-yellow for secondary elements */
+    --secondary-foreground: 0 0% 0%; /* Black text on secondary */
+    --muted: 211 35% 20%;          /* Dark muted blue */
+    --muted-foreground: 208 29% 60%;
+    --accent: 42 72% 60%;          /* Same as secondary for accent glow */
+    --accent-foreground: 0 0% 0%;
+    --destructive: 337 100% 74%;   /* Tron-lightred for destructive actions */
+    --destructive-foreground: 0 0% 100%; /* White for contrast on bright red */
+    --border: 214 61% 14%;         /* Dark blue border */
+    --input: var(--border);
+    --ring: 199 100% 78%;          /* Bright blue for focus rings */
+
+    --input-background: var(--card); /* Inputs match card background */
+    --input-foreground: var(--foreground);
+    --input-placeholder: var(--muted-foreground);
+
+    --chart-1: var(--primary);
+    --chart-2: var(--secondary);
+    --chart-3: 199 100% 78%;
+    --chart-4: 333 60% 45%;
+    --chart-5: 42 72% 60%;
+
+    --radius: 0.25rem;
+  }
+
+  .theme-blade-runner {
+    /*
+     * Theme: Blade Runner – Neon City Nights
+     */
+    --background: 210 60% 6%;
+    --foreground: 198 15% 88%;
+    --card: 210 40% 12%;
+    --card-foreground: var(--foreground);
+    --popover: var(--card);
+    --popover-foreground: var(--foreground);
+    --primary: 16 100% 60%;
+    --primary-foreground: 0 0% 0%;
+    --secondary: 187 100% 45%;
+    --secondary-foreground: 0 0% 0%;
+    --accent: 330 80% 65%;
+    --accent-foreground: 0 0% 0%;
+    --muted: 210 25% 18%;
+    --muted-foreground: 198 15% 70%;
+    --destructive: 0 70% 50%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 210 30% 22%;
+    --input: var(--border);
+    --ring: var(--primary);
+
+    --success: 132 55% 45%;
+    --success-foreground: 0 0% 0%;
+    --warning: 42 100% 50%;
+    --warning-foreground: 0 0% 0%;
+    --info: 200 90% 55%;
+    --info-foreground: 0 0% 0%;
+
+    --input-background: var(--card);
+    --input-foreground: var(--foreground);
+    --input-placeholder: var(--muted-foreground);
+
+    --chart-1: var(--primary);
+    --chart-2: var(--secondary);
+    --chart-3: var(--accent);
+    --chart-4: 48 100% 52%;
+    --chart-5: 210 30% 60%;
+
+    --radius: 0.3rem;
+  }
+
+  .theme-wall-e {
+    /*
+     * Theme: WALL‑E – Earthbound Optimism
+     */
+    --background: 40 30% 94%;
+    --foreground: 30 40% 20%;
+    --card: 40 23% 88%;
+    --card-foreground: var(--foreground);
+    --popover: var(--card);
+    --popover-foreground: var(--card-foreground);
+    --primary: 32 85% 58%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 210 35% 55%;
+    --secondary-foreground: 0 0% 100%;
+    --accent: 32 85% 58%;
+    --accent-foreground: 0 0% 100%;
+    --muted: 40 15% 78%;
+    --muted-foreground: 30 20% 38%;
+    --destructive: 0 70% 42%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 40 25% 76%;
+    --input: var(--border);
+    --ring: var(--primary);
+
+    --success: 132 55% 42%;
+    --success-foreground: 0 0% 100%;
+    --warning: 35 100% 45%;
+    --warning-foreground: 0 0% 0%;
+    --info: 205 85% 48%;
+    --info-foreground: 0 0% 100%;
+
+    --input-background: var(--card);
+    --input-foreground: var(--card-foreground);
+    --input-placeholder: var(--muted-foreground);
+
+    --chart-1: var(--primary);
+    --chart-2: var(--secondary);
+    --chart-3: 210 35% 40%;
+    --chart-4: 0 0% 40%;
+    --chart-5: 32 85% 35%;
+
+    --radius: 0.5rem;
+  }
+
+  .theme-wes-anderson {
+    /*
+     * Theme: Wes Anderson – Pastel Whimsy
+     */
+    --background: 26 43% 94%;
+    --foreground: 20 25% 20%;
+    --card: 26 43% 88%;
+    --card-foreground: var(--foreground);
+    --popover: var(--card);
+    --popover-foreground: var(--foreground);
+    --primary: 174 50% 72%;
+    --primary-foreground: 0 0% 0%;
+    --secondary: 50 75% 76%;
+    --secondary-foreground: 0 0% 0%;
+    --accent: 340 35% 68%;
+    --accent-foreground: 0 0% 0%;
+    --muted: 340 30% 82%;
+    --muted-foreground: 340 30% 38%;
+    --destructive: 0 55% 48%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 26 30% 82%;
+    --input: var(--border);
+    --ring: var(--primary);
+
+    --success: 132 55% 42%;
+    --success-foreground: 0 0% 0%;
+    --warning: 42 100% 50%;
+    --warning-foreground: 0 0% 0%;
+    --info: 200 80% 55%;
+    --info-foreground: 0 0% 100%;
+
+    --input-background: var(--card);
+    --input-foreground: var(--foreground);
+    --input-placeholder: var(--muted-foreground);
+
+    --chart-1: var(--primary);
+    --chart-2: var(--secondary);
+    --chart-3: var(--accent);
+    --chart-4: 26 43% 64%;
+    --chart-5: 340 30% 60%;
+
+    --radius: 1rem;
+  }
+
+  .theme-evangelion {
+    /*
+     * Theme: Evangelion – Nerv Headquarters
+     */
+    --background: 260 22% 12%;
+    --foreground: 300 15% 88%;
+    --card: 260 22% 18%;
+    --card-foreground: var(--foreground);
+    --popover: var(--card);
+    --popover-foreground: var(--foreground);
+    --primary: 296 75% 55%;
+    --primary-foreground: 0 0% 0%;
+    --secondary: 110 75% 55%;
+    --secondary-foreground: 0 0% 0%;
+    --accent: 110 75% 55%;
+    --accent-foreground: 0 0% 0%;
+    --muted: 260 15% 22%;
+    --muted-foreground: 300 15% 70%;
+    --destructive: 0 70% 52%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 260 25% 28%;
+    --input: var(--border);
+    --ring: var(--primary);
+
+    --success: 132 55% 45%;
+    --success-foreground: 0 0% 0%;
+    --warning: 42 100% 50%;
+    --warning-foreground: 0 0% 0%;
+    --info: 200 90% 55%;
+    --info-foreground: 0 0% 0%;
+
+    --input-background: var(--card);
+    --input-foreground: var(--foreground);
+    --input-placeholder: var(--muted-foreground);
+
+    --chart-1: var(--primary);
+    --chart-2: var(--secondary);
+    --chart-3: var(--accent);
+    --chart-4: 0 70% 52%;
+    --chart-5: 260 22% 35%;
+
+    --radius: 0.3rem;
+  }
+
+  .theme-westworld {
+    /*
+     * Theme: Westworld – Industrial Frontier
+     */
+    --background: 220 15% 12%;
+    --foreground: 220 15% 88%;
+    --card: 220 15% 18%;
+    --card-foreground: var(--foreground);
+    --popover: var(--card);
+    --popover-foreground: var(--foreground);
+    --primary: 200 35% 55%;
+    --primary-foreground: 0 0% 0%;
+    --secondary: 40 25% 75%;
+    --secondary-foreground: 0 0% 0%;
+    --accent: 40 65% 55%;
+    --accent-foreground: 0 0% 0%;
+    --muted: 220 10% 28%;
+    --muted-foreground: 220 10% 68%;
+    --destructive: 0 65% 48%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 15% 28%;
+    --input: var(--border);
+    --ring: var(--primary);
+
+    --success: 132 55% 45%;
+    --success-foreground: 0 0% 0%;
+    --warning: 42 100% 50%;
+    --warning-foreground: 0 0% 0%;
+    --info: 200 90% 55%;
+    --info-foreground: 0 0% 0%;
+
+    --input-background: var(--card);
+    --input-foreground: var(--foreground);
+    --input-placeholder: var(--muted-foreground);
+
+    --chart-1: var(--primary);
+    --chart-2: var(--secondary);
+    --chart-3: var(--accent);
+    --chart-4: 0 65% 48%;
+    --chart-5: 220 15% 60%;
+
+    --radius: 0.35rem;
+  }
+
+  .theme-severance {
+    /*
+     * Theme: Severance – Lumon Office Glow
+     */
+    --background: 200 10% 97%;
+    --foreground: 200 10% 10%;
+    --card: 200 10% 98%;
+    --card-foreground: var(--foreground);
+    --popover: var(--card);
+    --popover-foreground: var(--foreground);
+    --primary: 210 55% 58%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 0 0% 82%;
+    --secondary-foreground: 0 0% 0%;
+    --accent: 347 75% 45%;
+    --accent-foreground: 0 0% 100%;
+    --muted: 200 5% 88%;
+    --muted-foreground: 200 5% 38%;
+    --destructive: 0 70% 55%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 200 10% 90%;
+    --input: var(--border);
+    --ring: var(--primary);
+
+    --success: 132 55% 42%;
+    --success-foreground: 0 0% 0%;
+    --warning: 42 100% 50%;
+    --warning-foreground: 0 0% 0%;
+    --info: 200 90% 55%;
+    --info-foreground: 0 0% 0%;
+
+    --input-background: var(--card);
+    --input-foreground: var(--foreground);
+    --input-placeholder: var(--muted-foreground);
+
+    --chart-1: var(--primary);
+    --chart-2: var(--secondary);
+    --chart-3: var(--accent);
+    --chart-4: 200 5% 55%;
+    --chart-5: 347 75% 45%;
+
+    --radius: 0.6rem;
+  }
+
+  .theme-fringe {
+    /*
+     * Theme: Fringe – Amber Mysteries
+     */
+    --background: 230 15% 10%;
+    --foreground: 50 10% 92%;
+    --card: 230 15% 14%;
+    --card-foreground: var(--foreground);
+    --popover: var(--card);
+    --popover-foreground: var(--foreground);
+    --primary: 50 85% 55%;
+    --primary-foreground: 0 0% 0%;
+    --secondary: 190 65% 45%;
+    --secondary-foreground: 0 0% 0%;
+    --accent: 340 70% 55%;
+    --accent-foreground: 0 0% 0%;
+    --muted: 230 10% 22%;
+    --muted-foreground: 50 10% 65%;
+    --destructive: 0 70% 50%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 230 15% 24%;
+    --input: var(--border);
+    --ring: var(--primary);
+
+    --success: 132 55% 45%;
+    --success-foreground: 0 0% 0%;
+    --warning: 42 100% 50%;
+    --warning-foreground: 0 0% 0%;
+    --info: 200 90% 55%;
+    --info-foreground: 0 0% 0%;
+
+    --input-background: var(--card);
+    --input-foreground: var(--foreground);
+    --input-placeholder: var(--muted-foreground);
+
+    --chart-1: var(--primary);
+    --chart-2: var(--secondary);
+    --chart-3: var(--accent);
+    --chart-4: 0 70% 50%;
+    --chart-5: 230 15% 60%;
+
+    --radius: 0.3rem;
+  }
+
+  .theme-helix {
+    /*
+     * Theme: Helix – Clinical Cool
+     */
+    --background: 210 20% 96%;
+    --foreground: 210 15% 20%;
+    --card: 210 20% 90%;
+    --card-foreground: var(--foreground);
+    --popover: var(--card);
+    --popover-foreground: var(--foreground);
+    --primary: 160 65% 45%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 210 12% 65%;
+    --secondary-foreground: 0 0% 0%;
+    --accent: 160 65% 45%;
+    --accent-foreground: 0 0% 100%;
+    --muted: 210 15% 82%;
+    --muted-foreground: 210 15% 40%;
+    --destructive: 0 70% 45%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 210 20% 82%;
+    --input: var(--border);
+    --ring: var(--primary);
+
+    --success: 132 55% 45%;
+    --success-foreground: 0 0% 100%;
+    --warning: 42 100% 50%;
+    --warning-foreground: 0 0% 0%;
+    --info: 200 90% 55%;
+    --info-foreground: 0 0% 100%;
+
+    --input-background: var(--card);
+    --input-foreground: var(--foreground);
+    --input-placeholder: var(--muted-foreground);
+
+    --chart-1: var(--primary);
+    --chart-2: var(--secondary);
+    --chart-3: var(--accent);
+    --chart-4: 0 70% 45%;
+    --chart-5: 210 15% 50%;
+
+    --radius: 0.6rem;
+  }
+
+  .theme-warhammer-ultramarines {
+    /*
+     * Theme: Warhammer 40k - Ultramarines
+     * A theme inspired by the iconic blue and gold of the Ultramarines Space Marines.
+     * Features deep blues, bright contrasting blues, and a rich gold accent.
+     * Standard radius for a balanced, solid feel.
+     */
+    --background: 223 67% 15%;     /* Deep Ultramarines blue background */
+    --foreground: 218 100% 90%;    /* Light blue/white text */
+    --card: 224 67% 20%;           /* Slightly lighter blue for surfaces */
+    --card-foreground: 218 100% 90%;
+    --popover: 224 67% 20%;
+    --popover-foreground: 218 100% 90%;
+    --primary: 223 79% 57%;        /* Vibrant Ultramarines blue for primary elements */
+    --primary-foreground: 0 0% 100%; /* White text on primary */
+    --secondary: 218 100% 84%;     /* Light contrasting blue for secondary */
+    --secondary-foreground: 223 67% 15%; /* Dark blue text on light blue secondary */
+    --muted: 224 60% 25%;          /* Darker blue for muted */
+    --muted-foreground: 218 100% 75%;
+    --accent: 39 100% 63.5%;       /* Catalyst-Amber for gold trim accent */
+    --accent-foreground: 0 0% 9%;  /* Dark text on gold */
+    --destructive: 0 79% 57%;      /* Standard red for destructive actions */
+    --destructive-foreground: 0 0% 100%;
+    --border: 224 67% 30%;         /* Slightly lighter blue for borders */
+    --input: var(--border);
+    --ring: 223 79% 57%;
+
+    --input-background: var(--card); /* Inputs match card background */
+    --input-foreground: var(--foreground);
+    --input-placeholder: var(--muted-foreground);
+
+    --chart-1: 223 79% 57%;
+    --chart-2: 39 100% 63.5%;
+    --chart-3: 218 100% 84%;
+    --chart-4: 0 79% 57%;
+    --chart-5: 130 68% 55%;
+
+    --radius: 0.5rem;
+  }
+
+  .theme-chaos-marines {
+    /*
+     * Theme: Warhammer 40k - Chaos Space Marines
+     * A gritty, dark theme inspired by the reds, blacks, and brass of Chaos.
+     * Features dark, desaturated backgrounds, deep reds, and brass/gold accents.
+     * Slightly sharper corners for an aggressive feel.
+     */
+    --background: 0 11% 9%;        /* Dark desaturated red/brown background */
+    --foreground: 0 0% 80%;        /* Light grey text */
+    --card: 0 14% 14%;             /* Darker desaturated red/brown for surfaces */
+    --card-foreground: 0 0% 80%;
+    --popover: 0 14% 14%;
+    --popover-foreground: 0 0% 80%;
+    --primary: 0 100% 27%;         /* Deep blood red for primary elements */
+    --primary-foreground: 0 43% 93%; /* Light text on primary */
+    --secondary: 0 14% 39%;        /* Muted red/brown for secondary */
+    --secondary-foreground: 0 43% 85%; /* Lighter text on secondary */
+    --muted: 0 14% 18%;            /* Darker surface for muted */
+    --muted-foreground: 0 14% 50%;
+    --accent: 35 36% 51%;          /* Brass/Gold accent */
+    --accent-foreground: 0 11% 9%; /* Dark text on accent */
+    --destructive: 0 68% 41%;      /* Lighter, more intense red for destructive */
+    --destructive-foreground: 0 43% 93%;
+    --border: 0 14% 20%;           /* Darker border */
+    --input: var(--border);
+    --ring: 0 100% 27%;
+
+    --input-background: var(--card); /* Inputs match card background */
+    --input-foreground: var(--foreground);
+    --input-placeholder: var(--muted-foreground);
+
+    --chart-1: 0 100% 27%;
+    --chart-2: 35 36% 51%;
+    --chart-3: 0 14% 39%;
+    --chart-4: 0 68% 41%;
+    --chart-5: 120 49% 34%;
+
+    --radius: 0.375rem;
+  }
+
+  .theme-dracula {
+    /*
+     * Theme: Dracula
+     * A popular dark theme known for its distinct vibrant colors on a dark background.
+     * Uses a deep purple background with foregrounds in light grey, green, and vibrant pink/purple.
+     */
+    --background: 231 15% 18%;     /* Deep purple-grey background */
+    --foreground: 60 30% 96%;      /* Light foreground text */
+    --card: 232 15% 23%;           /* Slightly lighter purple-grey for surfaces */
+    --card-foreground: 60 30% 96%;
+    --popover: 232 15% 23%;
+    --popover-foreground: 60 30% 96%;
+    --primary: 264 88% 76%;        /* Vibrant purple for primary elements */
+    --primary-foreground: 231 15% 18%; /* Dark text on primary */
+    --secondary: 227 13% 31%;      /* Darker gray-blue for secondary */
+    --secondary-foreground: 60 30% 96%;
+    --muted: 227 13% 35%;
+    --muted-foreground: 226 10% 69%;
+    --accent: 170 84% 60%;         /* Bright green for accents */
+    --accent-foreground: 231 15% 18%;
+    --destructive: 0 100% 67%;     /* Bright red for destructive actions */
+    --destructive-foreground: 0 0% 98%;
+    --border: 227 10% 25%;
+    --input: var(--border);
+    --ring: 170 84% 60%;
+
+    --input-background: var(--card); /* Inputs match card background */
+    --input-foreground: var(--foreground);
+    --input-placeholder: var(--muted-foreground);
+
+    --chart-1: 0 100% 67%;
+    --chart-2: 170 84% 60%;
+    --chart-3: 264 88% 76%;
+    --chart-4: 40 100% 73%;
+    --chart-5: 197 90% 79%;
+
+    --radius: 0.5rem;
+  }
+
+  .theme-high-contrast {
+    /* Simple black and white high contrast theme */
+    --background: 0 0% 0%;
+    --foreground: 0 0% 100%;
+    --card: 0 0% 0%;
+    --card-foreground: 0 0% 100%;
+    --popover: 0 0% 0%;
+    --popover-foreground: 0 0% 100%;
+    --primary: 60 100% 50%;
+    --primary-foreground: 0 0% 0%;
+    --secondary: 0 0% 20%;
+    --secondary-foreground: 0 0% 100%;
+    --muted: 0 0% 15%;
+    --muted-foreground: 0 0% 85%;
+    --accent: 60 100% 50%;
+    --accent-foreground: 0 0% 0%;
+    --destructive: 0 100% 50%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 0 0% 40%;
+    --input: var(--border);
+    --ring: 60 100% 50%;
+
+    --input-background: var(--background);
+    --input-foreground: var(--foreground);
+    --input-placeholder: var(--muted-foreground);
+
+    --chart-1: 60 100% 50%;
+    --chart-2: 0 0% 100%;
+    --chart-3: 0 0% 75%;
+    --chart-4: 0 0% 50%;
+    --chart-5: 0 0% 25%;
+
+    --radius: 0;
+  }
+
+  .theme-dyslexia {
+    /* Light theme optimized for dyslexic users */
+    --background: 0 0% 100%;
+    --foreground: 0 0% 10%;
+    --card: 0 0% 96%;
+    --card-foreground: 0 0% 10%;
+    --popover: 0 0% 96%;
+    --popover-foreground: 0 0% 10%;
+    --primary: 210 100% 35%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 210 20% 92%;
+    --secondary-foreground: 0 0% 20%;
+    --muted: 0 0% 90%;
+    --muted-foreground: 0 0% 40%;
+    --accent: 210 100% 35%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 100% 50%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 0 0% 80%;
+    --input: var(--border);
+    --ring: 210 100% 35%;
+
+    --input-background: var(--background);
+    --input-foreground: var(--foreground);
+    --input-placeholder: var(--muted-foreground);
+
+    --chart-1: 210 100% 35%;
+    --chart-2: 210 20% 60%;
+    --chart-3: 210 20% 40%;
+    --chart-4: 210 20% 20%;
+    --chart-5: 0 100% 50%;
+
+    --radius: 0.5rem;
+  }
+
+  /*
+   * --- Global CSS Application ---
+   * These rules apply common styling to HTML elements, ensuring they
+   * consistently utilize the currently active theme's CSS variables.
+   */
+  * {
+    @apply border-border; /* Apply theme-specific border color globally */
+  }
+
+  body {
+    @apply bg-background text-foreground text-base; /* Apply theme-specific background, text color, and base font size to body */
+    font-family: var(--font-inter);
+  }
+
+  .theme-dyslexia body {
+    font-family: var(--font-dyslexic);
+  }
+
+  .theme-warhammer-ultramarines body,
+  .theme-chaos-marines body,
+  .theme-dow body {
+    font-family: var(--font-warhammer);
+  }
+
+  .theme-dune body {
+    font-family: var(--font-dune);
+  }
+
+  .theme-matrix body {
+    font-family: var(--font-matrix);
+  }
+
+  .theme-tron body {
+    font-family: var(--font-tron);
+  }
+
+  .theme-blade-runner body {
+    font-family: var(--font-blade);
+  }
+
+  .theme-wall-e body {
+    font-family: var(--font-walle);
+  }
+
+  .theme-wes-anderson body {
+    font-family: var(--font-wesanderson);
+  }
+
+  .theme-evangelion body {
+    font-family: var(--font-evangelion);
+  }
+
+  .theme-westworld body {
+    font-family: var(--font-westworld);
+  }
+
+  .theme-severance body {
+    font-family: var(--font-severance);
+  }
+
+  .theme-fringe body {
+    font-family: var(--font-fringe);
+  }
+
+  .theme-helix body {
+    font-family: var(--font-helix);
+  }
+
+  h1 {
+    @apply text-2xl font-semibold; /* Consistent heading style */
+  }
+
+  /*
+   * --- Consolidated Input/Textarea Styling ---
+   * This section applies styles to input fields and textareas using
+   * the newly introduced `--input-background`, `--input-foreground`,
+   * and `--input-placeholder` variables. This eliminates repetition
+   * by centralizing the application of these styles based on the theme's
+   * variable definitions.
+   */
+  input[type="text"],
+  textarea,
+  input[type="email"], /* Added for completeness if email inputs are used */
+  input[type="password"], /* Added for completeness if password inputs are used */
+  input[type="number"] /* Added for completeness if number inputs are used */ {
+    background-color: hsl(var(--input-background));
+    color: hsl(var(--input-foreground));
+    /* Apply placeholder color using a custom property */
+    &::placeholder {
+      color: hsl(var(--input-placeholder));
+    }
+    /* Common styling for consistency (e.g., border, padding, rounding) */
+    @apply border rounded-md px-3 py-2 focus:outline-none focus:ring-1 focus:ring-ring;
+  }
+
+
+
+  /*
+   * --- Global Sidebar Variable Derivations ---
+   * These variables are derived *once* from the main theme variables.
+   * This significantly reduces repetition across theme definitions and ensures
+   * the sidebar automatically adapts to the active theme's core colors.
+   */
+  :root, .dark,
+  .theme-dune, .theme-dow, .theme-matrix, .theme-tron,
+  .theme-blade-runner, .theme-wall-e, .theme-wes-anderson,
+  .theme-evangelion, .theme-westworld, .theme-severance,
+  .theme-fringe, .theme-helix,
+  .theme-warhammer-ultramarines, .theme-chaos-marines, .theme-dracula,
+  .theme-high-contrast, .theme-dyslexia {
+    --sidebar-background: var(--card);
+    --sidebar-foreground: var(--card-foreground);
+    --sidebar-primary: var(--primary);
+    --sidebar-primary-foreground: var(--primary-foreground);
+    --sidebar-secondary: var(--secondary); /* Added for completeness */
+    --sidebar-secondary-foreground: var(--secondary-foreground); /* Added for completeness */
+    --sidebar-muted: var(--muted); /* Added for completeness */
+    --sidebar-muted-foreground: var(--muted-foreground); /* Added for completeness */
+    --sidebar-accent: var(--accent);
+    --sidebar-accent-foreground: var(--accent-foreground);
+    --sidebar-border: var(--border);
+    --sidebar-ring: var(--ring);
+  }
+
+  /* Hide Next.js development badge - useful for clean production screenshots */
+  [data-next-badge="true"] {
+    display: none !important;
+  }
+
+  /*
+   * Override Bootstrap's .text-primary to use theme variables.
+   * Defaults to black but follows --primary for custom themes.
+   */
+  .text-primary {
+    color: hsl(var(--text-primary, var(--primary))) !important;
+  }
+}
+
+@layer utilities {
+  .scrollbar-none {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
+}

@@ -1,0 +1,126 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const express = require('express');
+const session = require('express-session');
+const MongoStore = require('connect-mongo');
+const mongoose = require('mongoose');
+const fetch = require('node-fetch');
+
+const { connect, disconnect } = require('./helpers/memory-db');
+const createRoutes = require('../../server/routes');
+const { User } = require('../../server/models');
+
+let server;
+let port;
+let checkoutCalls;
+let webhookConstructCalls;
+let webhookConstructEventResult;
+
+const stripeStub = {
+  checkout: {
+    sessions: {
+      create: async (opts) => {
+        checkoutCalls.push(opts);
+        return { url: 'https://stripe.example/session', id: 'cs_test_webhook' };
+      },
+    },
+  },
+  webhooks: {
+    constructEvent: (body, sig, secret) => {
+      webhookConstructCalls.push({ body: body.toString(), sig, secret });
+      return webhookConstructEventResult;
+    },
+  },
+};
+
+const userData = { username: 'hookuser', password: 'secret123', email: 'hook@example.com' };
+
+const webhookSecret = 'whsec_test123';
+
+test.before(async () => {
+  await connect();
+  const app = express();
+  app.use(express.json());
+  app.use(
+    session({
+      secret: 'a'.repeat(64),
+      resave: false,
+      saveUninitialized: false,
+      store: MongoStore.create({ client: mongoose.connection.getClient() }),
+    }),
+  );
+  app.use('/api', createRoutes(stripeStub, 'price_123', webhookSecret));
+  server = app.listen(0);
+  port = server.address().port;
+});
+
+test.after(async () => {
+  await new Promise((resolve) => server.close(resolve));
+  await disconnect();
+});
+
+function apiUrl(path) {
+  return `http://localhost:${port}${path}`;
+}
+
+test.skip('stripe webhook upgrades subscription when IDs match', async () => {
+  checkoutCalls = [];
+  webhookConstructCalls = [];
+  let res = await fetch(apiUrl('/api/register'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(userData),
+  });
+  assert.equal(res.status, 200);
+
+  res = await fetch(apiUrl('/api/login'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: userData.username, password: userData.password }),
+  });
+  assert.equal(res.status, 200);
+  const cookie = res.headers.get('set-cookie');
+
+  res = await fetch(apiUrl('/api/create-checkout-session'), {
+    method: 'POST',
+    headers: { cookie },
+  });
+  const body = await res.json();
+  const sessionId = body.id;
+
+  const userBefore = await User.findOne({ username: userData.username });
+  assert.equal(userBefore.pendingCheckoutSessionId, sessionId);
+
+  webhookConstructEventResult = {
+    type: 'checkout.session.completed',
+    data: { object: { id: sessionId, client_reference_id: userBefore.id } },
+  };
+  res = await fetch(apiUrl('/api/stripe-webhook'), {
+    method: 'POST',
+    headers: { 'stripe-signature': 'sig' },
+    body: 'dummy',
+  });
+  assert.equal(res.status, 200);
+
+  const userAfter = await User.findById(userBefore.id);
+  assert.equal(userAfter.subscriptionStatus, 'premium');
+  assert.equal(userAfter.pendingCheckoutSessionId, undefined);
+  assert.ok(webhookConstructCalls.length > 0);
+});
+
+test.skip('stripe webhook ignored if session ID mismatches', async () => {
+  const user = await User.findOne({ username: userData.username });
+  webhookConstructEventResult = {
+    type: 'checkout.session.completed',
+    data: { object: { id: 'cs_wrong', client_reference_id: user.id } },
+  };
+  const res = await fetch(apiUrl('/api/stripe-webhook'), {
+    method: 'POST',
+    headers: { 'stripe-signature': 'sig' },
+    body: 'dummy',
+  });
+  assert.equal(res.status, 200);
+  const updated = await User.findById(user.id);
+  assert.equal(updated.subscriptionStatus, 'premium');
+  assert.notEqual(updated.pendingCheckoutSessionId, 'cs_wrong');
+});
