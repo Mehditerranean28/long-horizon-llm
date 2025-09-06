@@ -1,6 +1,7 @@
 # constants.py
 
 # === Planner ===
+# (planner prompt unchanged)
 PLANNER_PROMPT = (
     "You are a decomposition engine.\n"
     "Return STRICT JSON:\n"
@@ -28,18 +29,108 @@ from prompts.reasoning_templates import (
     R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11, R12, R13, R14, R15, R16, R17, R18, R19, R20, R21,
 )
 
+# === Global LLM tuning defaults (the orchestrator may read/propagate these) ===
+LLM_DEFAULTS = {
+    "max_output_tokens": 8192,
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "presence_penalty": 0.0,
+    "frequency_penalty": 0.0,
+    "length_penalty": 1.0,
+    "beam_size": 1,
+    "do_sample": True,
+    "stop_sequences": [],
+    "self_consistency": {"k": 5, "agreement_threshold": 0.55, "hedge": True},
+}
+
 # === Node authoring / iteration ===
+# High-density, expert-grade section template; backward compatible header requirement preserved.
 PROMPT_TEMPLATES = {
-    # Your templates can be fancier; this is a simple, safe default.
     "GENERIC": (
-        "You are writing a section for a larger answer.\n"
+        "You are writing an expert-grade section for a larger technical answer.\n"
         "Template ID: {tmpl}\n"
         "User query:\n{query}\n\n"
         "If helpful, consider these dependency bullets (may be empty):\n{deps}\n\n"
-        "Write a clear, self-contained section in Markdown.\n"
-        "Start with this exact header:\n## {section}\n"
+        "Write a comprehensive, self-contained section in Markdown.\n"
+        "Start with this exact header:\n## {section}\n\n"
+        "Then provide the following subsections (use these exact subheadings when applicable; omit gracefully if N/A):\n"
+        "### Overview\n"
+        "### Decisions & Rationale\n"
+        "- Enumerate key decisions as numbered claims with short justifications (no fabricated citations).\n"
+        "### Risks & Mitigations\n"
+        "### Metrics & SLOs\n"
+        "### Examples\n"
+        "### Checklist\n"
+        "### Keywords\n\n"
+        "Style: dense, specific, operational; prefer concrete numbers, interfaces, acceptance tests, and crisp bullets over generic prose.\n"
+        "Do not fabricate sources; qualify uncertain claims. Use as much space as needed up to your maximum output limit.\n"
     )
 }
+
+# === New: Structured claim extraction & reflective prompts ===
+# The extractor must return ONLY a single JSON object like:
+# {"claims":[{"subject":"...", "predicate":"is|has|does|supports|equals|causes|belongs_to|uses|other",
+#             "object":"...", "polarity":true, "confidence":0.0..1.0}]}
+CLAIMS_EXTRACT_PROMPT = (
+    "SYSTEM: EXTRACT_CLAIMS\n"
+    "Return ONLY a single JSON object with key 'claims'.\n"
+    "Each claim: {subject, predicate, object (string or null), polarity (bool), confidence (0..1)}.\n"
+    "Be concise; merge duplicates; abstain when unsure (omit claim).\n\n"
+    "TEXT:\n{content}"
+)
+
+# Tiered reflective prompts (LRA-M inspired)
+REFLECT_LEARN_PROMPT = (
+    "SYSTEM: REFLECT_LEARN\n"
+    "Conceptualize observations into an updated self-model.\n"
+    "Return ONLY JSON like {\"beliefs\":[], \"desires\":[], \"norms\":[], \"strategies\":[]}.\n"
+    "OBS:\n{obs}"
+)
+
+REFLECT_GOV_PROMPT = (
+    "SYSTEM: REFLECT_GOV\n"
+    "Evaluate proposed action against the self-model.\n"
+    "Return ONLY JSON like {\"decision\":\"approve|veto|revise\", \"reason\":\"...\", \"revision\": \"...\"}.\n"
+    "ACTION:\n{action}\nMODEL:\n{model}"
+)
+
+REFLECT_DIVERSIFY_PROMPT = (
+    "SYSTEM: REFLECT_DIVERSIFY\n"
+    "Generate 3-5 diverse alternatives to the proposed action; JSON {\"alts\":[\"...\"]}.\n"
+    "PROPOSED:\n{proposed}"
+)
+
+REFLECT_SELECT_PROMPT = (
+    "SYSTEM: REFLECT_SELECT\n"
+    "Select the best option given utility = quality - risk - cost. Return ONLY JSON {\"choice\":\"...\",\"reason\":\"...\"}.\n"
+    "OPTIONS:\n{options}"
+)
+
+REFLECT_REREP_PROMPT = (
+    "SYSTEM: REFLECT_REREP\n"
+    "Re-represent the self-model at a higher abstraction while preserving semantics.\n"
+    "Return ONLY JSON model.\nMODEL:\n{model}"
+)
+
+# === Consistency sampling & uncertainty hedging ===
+# Given N candidates with extracted claims, pick the one with highest inter-candidate agreement
+# and lowest unsupported/novel claim mass.
+CONSISTENCY_SELECT_PROMPT = (
+    "SYSTEM: CONSISTENCY_SELECT\n"
+    "You are given several candidate texts with their extracted claims.\n"
+    "Select the index (0-based) that maximizes agreement with peers and minimizes unsupported novelty.\n"
+    "Return ONLY JSON like {\"index\": int, \"reason\": \"...\"}.\n"
+    "CANDIDATES:\n{bundle}"
+)
+
+# Rewrite to hedge or qualify claims when agreement/verification is weak; avoid fake citations.
+HEDGE_UNCERTAINTY_PROMPT = (
+    "SYSTEM: HEDGE_UNCERTAINTY\n"
+    "Rewrite the text to reduce hallucination risk: qualify low-confidence claims, mark as hypotheses, "
+    "and avoid fabricating sources. Preserve structure and intent; return ONLY revised markdown.\n"
+    "TEXT:\n---\n{text}\n---\n"
+    "LOW_CONF_CLAIMS:\n{claims}"
+)
 
 # Fallback if PROMPT_TEMPLATES.get(tmpl) is missing
 PROMPT_FILL_VALUES = PROMPT_TEMPLATES["GENERIC"]
@@ -81,8 +172,15 @@ CQAP_SECTION_PROMPT = (
     "Write the **{slot}** section for the user query.\n\n"
     "Query:\n---\n{query}\n---\n\n"
     "Guidance:\n{slot_spec}\n\n"
-    "Output strictly as markdown under the header '{slot}'.\n"
-    "Prefer 3-6 tight bullets or a short paragraph with concrete specifics."
+    "Output strictly as markdown under the header '{slot}'. Then, when applicable, include these subsections:\n"
+    "### Overview\n"
+    "### Key Factors & Rationale\n"
+    "### Risks & Mitigations\n"
+    "### Evidence & Checks\n"
+    "### Examples\n"
+    "### Follow-ups / Next Steps\n\n"
+    "Be comprehensive and specific; prefer concrete bullets, measurable criteria, and operational guidance. "
+    "Avoid fabrications; qualify uncertainty. Use as much space as needed up to your maximum output limit."
 )
 
 # === Mission plan prompts ===
@@ -113,6 +211,35 @@ FINAL_SYNTHESIS_PROMPT = (
     "Combine all Objectives into a cohesive **{fin_section}**.\n"
     "Ensure coverage of the mission query, note trade-offs and residual risks, "
     "and list produced artifacts by phase."
+)
+
+# === Dense final answer enrichment ===
+# Can be used after composition to produce an executive-quality, richly structured final answer.
+DENSE_FINAL_ANSWER_PROMPT = (
+    "Transform the composed document into a dense, executive-quality final answer. "
+    "Return ONLY markdown with the following structure (omit sections that are truly N/A):\n\n"
+    "## Final Answer\n"
+    "### Executive Summary\n"
+    "### Key Decisions (numbered claims)\n"
+    "### Architecture Snapshot\n"
+    "### Data Model & Idempotency\n"
+    "### Framework Decision & Rationale\n"
+    "### Rollout Plan (Canary & Rollback)\n"
+    "### Risks & Mitigations\n"
+    "### Metrics & SLOs\n"
+    "### Examples / Scenarios\n"
+    "### Next Steps\n"
+    "### Glossary\n\n"
+    "Guidelines:\n"
+    "- Dense and specific; use concrete numbers, interfaces, and acceptance tests.\n"
+    "- Do not fabricate sources; qualify uncertainty clearly.\n"
+    "- Keep headings consistent; ensure cross-references align with prior sections.\n"
+    "- Use as much space as needed up to your maximum output limit.\n\n"
+    "---\n"
+    "DOCUMENT\n"
+    "---\n"
+    "{document}\n"
+    "---"
 )
 
 # === Cohesion pass prompts ===

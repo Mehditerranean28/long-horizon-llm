@@ -16,6 +16,7 @@ import uuid
 import os
 import re
 import time
+import threading
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +31,7 @@ from typing import (
     Optional,
     Protocol,
     Sequence,
+    Set,
     Tuple,
     runtime_checkable,
 )
@@ -44,6 +46,7 @@ from constants import (
     COHESION_APPLY_PROMPT,
     LLM_JUDGE_PROMPT,
     NODE_RECOMMEND_PROMPT,
+    DENSE_FINAL_ANSWER_PROMPT,
     NODE_APPLY_PROMPT,
     CONTRADICTION_PROMPT,
     ANALYSIS_NODE_PROMPT,
@@ -63,6 +66,14 @@ from constants import (
     CONTROL_UNIT_PROMPT,
     AGENT_PROMPTS,
     GENERIC_AGENT_PROMPT,
+    CLAIMS_EXTRACT_PROMPT,
+    REFLECT_LEARN_PROMPT,
+    REFLECT_GOV_PROMPT,
+    REFLECT_DIVERSIFY_PROMPT,
+    REFLECT_SELECT_PROMPT,
+    REFLECT_REREP_PROMPT,
+    CONSISTENCY_SELECT_PROMPT,
+    HEDGE_UNCERTAINTY_PROMPT,
 )
 
 from kern.src.kern.core import init_logging
@@ -361,6 +372,7 @@ class MemoryStore:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.data: Dict[str, Any] = {}
+        self._io_lock = threading.RLock()
         self._load()
     def _load(self) -> None:
         try:
@@ -369,9 +381,14 @@ class MemoryStore:
                 data = safe_json_loads(txt, default=None)
                 if not isinstance(data, dict):
                     raise ValueError("memory json corrupted")
+                # ensure top-level buckets
                 self.data = data
+                self.data.setdefault("judges", {})
+                self.data.setdefault("patch_stats", {})
+                self.data.setdefault("klines", {})
+                self.data.setdefault("beliefs", {})
             else:
-                self.data = {"judges": {}, "patch_stats": {}, "klines": {}}
+                self.data = {"judges": {}, "patch_stats": {}, "klines": {}, "beliefs": {}}
         except Exception as e:
             _LOG.exception("MemoryStore load failed: %s", e)
             try:
@@ -381,14 +398,15 @@ class MemoryStore:
                     _LOG.warning("quarantined corrupt memory to %s", bak)
             except Exception:
                 pass
-            self.data = {"judges": {}, "patch_stats": {}, "klines": {}}
+            self.data = {"judges": {}, "patch_stats": {}, "klines": {}, "beliefs": {}}
     def save(self) -> None:
-        tmp = self.path.with_suffix(".tmp")
-        try:
-            tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp.replace(self.path)
-        except Exception as e:
-            _LOG.exception("MemoryStore save failed: %s", e)
+        with self._io_lock:
+            tmp = self.path.with_suffix(".tmp")
+            try:
+                tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
+                tmp.replace(self.path)
+            except Exception as e:
+                _LOG.exception("MemoryStore save failed: %s", e)
     def bump_judge(self, judge: str, delta: float) -> None:
         j = self.data.setdefault("judges", {}).setdefault(judge, {"weight": 1.0})
         j["weight"] = max(0.1, min(3.0, float(j.get("weight", 1.0)) + delta))
@@ -397,6 +415,75 @@ class MemoryStore:
     def record_patch(self, kind: str, ok: bool) -> None:
         s = self.data.setdefault("patch_stats", {}).setdefault(kind, {"ok": 0, "fail": 0})
         s["ok" if ok else "fail"] += 1
+    # === Belief store (claim-level knowledge) ===
+    @staticmethod
+    def _belief_id(claim: Mapping[str, Any]) -> str:
+        # stable id from canonicalized fields
+        sub = (claim.get("subject") or "").strip().lower()
+        pred = (claim.get("predicate") or "").strip().lower()
+        obj = (claim.get("object") or "")
+        pol = "1" if bool(claim.get("polarity", True)) else "0"
+        raw = f"{sub}|{pred}|{obj}|{pol}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    def add_beliefs(self, *, sig: str, node: str, run_id: str, claims: Sequence[Mapping[str, Any]]) -> None:
+        """
+        Upsert beliefs extracted from a node artifact.
+        belief = { id, subject, predicate, object, polarity, confidence, provenance:{sig,node,run_id,ts} }
+        """
+        now = time.time()
+        beliefs = self.data.setdefault("beliefs", {})
+        for c in claims or []:
+            try:
+                bid = self._belief_id(c)
+                b = beliefs.get(bid, {})
+                # take max confidence and merge provenance set
+                conf = float(c.get("confidence", b.get("confidence", 0.5)))
+                subj = c.get("subject", b.get("subject"))
+                pred = c.get("predicate", b.get("predicate"))
+                obj = c.get("object", b.get("object"))
+                pol = bool(c.get("polarity", b.get("polarity", True)))
+                prov = b.get("provenance", [])
+                prov.append({"sig": sig, "node": node, "run_id": run_id, "ts": now})
+                beliefs[bid] = {
+                    "id": bid,
+                    "subject": subj,
+                    "predicate": pred,
+                    "object": obj,
+                    "polarity": pol,
+                    "confidence": max(float(b.get("confidence", 0.0)), conf),
+                    "provenance": prov,
+                }
+            except Exception:
+                continue
+        self.save()
+    def beliefs_for_sig(self, sig: str) -> Dict[str, Any]:
+        out = {}
+        for bid, b in (self.data.get("beliefs") or {}).items():
+            provs = b.get("provenance") or []
+            if any(p.get("sig") == sig for p in provs):
+                out[bid] = b
+        return out
+    def detect_belief_conflicts(self, *, scope_sig: Optional[str] = None) -> List[Tuple[str, str, Dict[str, Any]]]:
+        """
+        Return list of (bid_a, bid_b, meta) where two beliefs contradict (same subject+predicate+object, opposite polarity).
+        If scope_sig is set, restrict to beliefs that have provenance with that sig.
+        """
+        by_key: Dict[Tuple[str, str, Any], Dict[str, Any]] = {}
+        conflicts: List[Tuple[str, str, Dict[str, Any]]] = []
+        def key(b: Mapping[str, Any]) -> Tuple[str, str, Any]:
+            return ((b.get("subject") or "").strip().lower(), (b.get("predicate") or "").strip().lower(), b.get("object"))
+        for bid, b in (self.data.get("beliefs") or {}).items():
+            if scope_sig:
+                provs = b.get("provenance") or []
+                if not any(p.get("sig") == scope_sig for p in provs):
+                    continue
+            k = key(b)
+            other = by_key.get(k)
+            if other and bool(other.get("polarity", True)) != bool(b.get("polarity", True)):
+                conflicts.append((other["id"], bid, {"key": k}))
+            else:
+                by_key[k] = b | {"id": bid}
+        return conflicts
     def get_kline(self, sig: str) -> Optional[Dict[str, Any]]:
         return self.data.setdefault("klines", {}).get(sig)
     def put_kline(self, sig: str, payload: Dict[str, Any]) -> None:
@@ -650,6 +737,16 @@ class MemoryStore:
         traces = entry.setdefault("traces", [])
         traces.append(trace)
         self.save()
+    # === Reflective self-models ===
+    def store_self_model(self, sig: str, model: Dict[str, Any]) -> None:
+        """Store/replace a reflective self-model for given signature."""
+        entry = self.data.setdefault("klines", {}).setdefault(sig, {})
+        entry["self_model"] = model
+        self.save()
+    def get_self_model(self, sig: str) -> Dict[str, Any]:
+        entry = self.get_kline(sig) or {}
+        model = entry.get("self_model")
+        return model if isinstance(model, dict) else {}
     def replay_kline(self, sig: str) -> List["Node"]:
         """
         Reconstruct Nodes from the latest stored trace (preferred) or legacy 'nodes' snapshot.
@@ -1326,6 +1423,8 @@ JUDGES.register(StructureJudge())
 JUDGES.register(ConsistencyJudge())
 JUDGES.register(BrevityJudge())
 
+# (optional) Veracity judge could be added here in future; kept minimal for now.
+
 @dataclass(slots=True)
 class LLMJudge:
     name: str = "llm-judge"
@@ -1378,20 +1477,26 @@ def _extract_claim_snippets(text: str, subject: str) -> str:
     merged = "\n".join(keep[:4]).strip()
     return merged or text[:300]
 
-async def draft_resolution(solver: BlackBoxSolver, conflicts: List[Tuple[str, str, str]], blackboard: Dict[str, Artifact]) -> str:
+async def draft_resolution(solver: BlackBoxSolver, conflicts: List[Tuple[str, str, Dict[str, Any]]], beliefs: Mapping[str, Any]) -> str:
+    """
+    Resolve conflicts at the belief layer using provenance to show evidence.
+    """
     if not conflicts: return ""
     lines = ["## Contradiction Resolution", ""]
-    for a, b, subj in conflicts:
-        ta = _extract_claim_snippets(blackboard[a].content, subj)
-        tb = _extract_claim_snippets(blackboard[b].content, subj)
-        prompt = _fmt(CONTRADICTION_PROMPT, subject=subj, a=ta, b=tb)
+    for bid_a, bid_b, meta in conflicts:
+        A = beliefs.get(bid_a, {})
+        B = beliefs.get(bid_b, {})
+        subj = A.get("subject") or B.get("subject") or str(meta.get("key"))
+        ta = json.dumps(A, ensure_ascii=False, indent=2)
+        tb = json.dumps(B, ensure_ascii=False, indent=2)
+        prompt = _fmt(CONTRADICTION_PROMPT, subject=str(subj), a=ta, b=tb)
         try:
             async with GLOBAL_LIMITER.slot():
                 res = await asyncio.wait_for(solver.solve(prompt, context={"mode":"contradiction_resolution"}), timeout=30.0)
             text = res.text if isinstance(res, SolverResult) else str(res)
         except Exception as e:
             text = f"_Resolution unavailable: {e}_"
-        lines.append(f"### {subj.title()}"); lines.append(text.strip()); lines.append("")
+        lines.append(f"### {str(subj).title()}"); lines.append(text.strip()); lines.append("")
     return "\n".join(lines).strip()
 
 @dataclass(slots=True)
@@ -1419,6 +1524,10 @@ class OrchestratorConfig:
     use_llm_classifier: bool = bool(int(os.getenv("USE_LLM_CLASSIFIER", "1")))
     ensemble_mode: bool = bool(int(os.getenv("ENSEMBLE_MODE", "1")))
     forecast_enable: bool = bool(int(os.getenv("FORECAST_ENABLE", "0")))
+    dense_final_enable: bool = bool(int(os.getenv("DENSE_FINAL_ENABLE", "0")))
+    consistency_sampling_enable: bool = bool(int(os.getenv("CONSISTENCY_SAMPLING_ENABLE", "1")))
+    consistency_samples: int = int(os.getenv("CONSISTENCY_SAMPLES", "3"))
+    agreement_threshold: float = float(os.getenv("AGREEMENT_THRESHOLD", "0.55"))
 
 @dataclass(slots=True)
 class Orchestrator:
@@ -1480,6 +1589,18 @@ class Orchestrator:
             s = FORECAST_ALPHA * r + (1 - FORECAST_ALPHA) * s
         return int(s * remaining_nodes * FORECAST_BUFFER)
 
+    async def reflective_learning(self, observations: Dict[str, Any]) -> Dict[str, Any]:
+        """Tier 2: Update self-models from experience (Kolb-like)."""
+        try:
+            raw = await self.planner_llm.complete(
+                _fmt(REFLECT_LEARN_PROMPT, obs=json.dumps(observations, ensure_ascii=False)),
+                temperature=0.0, timeout=20.0
+            )
+            model = safe_json_loads(_first_json_object(_sanitize_text(raw) or "") or "{}", default={}) or {}
+            return model if isinstance(model, dict) else {}
+        except Exception:
+            return {}
+
     async def generate_agents(self, query: str, n_experts: int = 3) -> List[Dict[str, str]]:
         """Generate query-related experts plus predefined roles (Sec.3.1)."""
         ag_prompt = _fmt(AGENT_GENERATION_PROMPT, question=query)
@@ -1527,22 +1648,26 @@ class Orchestrator:
 
     
     async def _hedged_solve(self, task: str, context: Mapping[str, Any], timeout: float) -> SolverResult:
-        if not self.config.hedge_enable:
+        """
+        Run with optional hedging. Token budget is accounted ONLY on the result that wins.
+        """
+        async def _call():
             async with GLOBAL_LIMITER.slot():
-                res = await asyncio.wait_for(self.solver.solve(task, context=context), timeout=timeout)
+                return await asyncio.wait_for(self.solver.solve(task, context=context), timeout=timeout)
+        if not self.config.hedge_enable:
+            res = await _call()
             return self._coerce_solver_result(res)
-        async with GLOBAL_LIMITER.slot():
-            primary = asyncio.create_task(asyncio.wait_for(self.solver.solve(task, context=context), timeout=timeout))
+        # Hedge path
+        primary = asyncio.create_task(_call())
         async def _backup():
             await asyncio.sleep(self.config.hedge_delay_sec)
-            async with GLOBAL_LIMITER.slot():
-                if not await self._reserve_tokens(HEDGE_TOKEN_RESERVE):
-                    return SolverResult(text="")  # Early exit on budget.
-                return await asyncio.wait_for(self.solver.solve(task, context=context), timeout=timeout)
+            return await _call()
         backup = asyncio.create_task(_backup())
         done, pending = await asyncio.wait({primary, backup}, return_when=asyncio.FIRST_COMPLETED)
-        for p in pending: p.cancel()
-        res = list(done)[0].result()
+        winner = list(done)[0]
+        for p in pending:
+            p.cancel()
+        res = winner.result()
         return self._coerce_solver_result(res)
 
     async def _run_judges(self, text: str, contract: Contract) -> List[Critique]:
@@ -1775,7 +1900,7 @@ class Orchestrator:
         blackboard_public: Dict[str, str],
         private: Optional[Dict[str, str]] = None,
     ) -> str:
-        """Execute an agent with a role-specific prompt (Fig.4)."""
+        """Execute an agent with Tier-1 governance and Tier-2 learning."""
         bb = dict(blackboard_public)
         if private:
             bb.update(private)
@@ -1789,11 +1914,45 @@ class Orchestrator:
         )
         ctx = {"llm": agent.get("llm"), "role": agent["role"]}
         res = await self._hedged_solve(prompt, ctx, timeout=20.0)
-        msg = res.text.strip()
-        if "output" in msg:
-            data = safe_json_loads(msg)
-            msg = data.get("output", msg)
-        return msg
+        proposed = res.text.strip()
+        # Governance (Tier-1)
+        self_model = self.memory.get_self_model(self._current_sig or "") if self._current_sig else {}
+        try:
+            gov_raw = await self.planner_llm.complete(
+                _fmt(REFLECT_GOV_PROMPT, action=proposed, model=json.dumps(self_model, ensure_ascii=False)),
+                temperature=0.0, timeout=10.0
+            )
+            gov = safe_json_loads(_first_json_object(_sanitize_text(gov_raw) or "") or "{}") or {}
+        except Exception:
+            gov = {}
+        decision = str(gov.get("decision", "approve")).lower()
+        if decision == "veto":
+            return f"Vetoed: {gov.get('reason','')}".strip()
+        if decision == "revise" and gov.get("revision"):
+            proposed = str(gov["revision"])
+        # Diversify (Tier-3) if flagged
+        if "deliberate" in agent.get("flags", []):
+            alts_raw = await self.planner_llm.complete(
+                _fmt(REFLECT_DIVERSIFY_PROMPT, proposed=proposed), temperature=0.2, timeout=10.0
+            )
+            alts = safe_json_loads(_first_json_object(_sanitize_text(alts_raw) or "") or "{}") or {}
+            options = [proposed] + list(alts.get("alts") or [])
+            sel_raw = await self.planner_llm.complete(
+                _fmt(REFLECT_SELECT_PROMPT, options=json.dumps(options, ensure_ascii=False)),
+                temperature=0.0, timeout=8.0
+            )
+            sel = safe_json_loads(_first_json_object(_sanitize_text(sel_raw) or "") or "{}") or {}
+            choice = sel.get("choice")
+            if isinstance(choice, str) and choice.strip():
+                proposed = choice.strip()
+        # Learn (Tier-2)
+        try:
+            model = await self.reflective_learning({"agent": agent.get("role"), "action": proposed, "bb": list(blackboard_public.keys())})
+            if model and self._current_sig:
+                self.memory.store_self_model(self._current_sig, model)
+        except Exception:
+            pass
+        return proposed
 
     async def blackboard_cycle(
         self,
@@ -1920,8 +2079,15 @@ class Orchestrator:
             first_prompt = node.build_prompt(query=self._current_query, deps_bullets=deps_bullets)
             if ctx:
                 first_prompt += "\n\n" + ctx
-            res = await self._hedged_solve(first_prompt, {"node":node.name, "deps":node.deps}, timeout=self.config.node_timeout_sec)
-            est = res.total_tokens or self._approx_tokens(res.text)
+            base_ctx = {"node": node.name, "deps": node.deps}
+            if self.config.consistency_sampling_enable and self.config.consistency_samples > 1:
+                res = await self._consistency_sample_and_select(first_prompt, node, base_ctx)
+                # ensure token accounting for consistency path
+                est = res.total_tokens or self._approx_tokens(res.text)
+            else:
+                _r = await self._hedged_solve(first_prompt, base_ctx, timeout=self.config.node_timeout_sec)
+                res = SolverResult(text=_sanitize_text(_r.text), total_tokens=_r.total_tokens)
+                est = res.total_tokens or self._approx_tokens(res.text)
             if est > self.config.max_tokens_per_node:
                 res = SolverResult(text=_sanitize_text(res.text)[:max(100, self.config.max_tokens_per_node * 4)], total_tokens=self.config.max_tokens_per_node)
         except Exception as e:
@@ -2039,6 +2205,117 @@ class Orchestrator:
                         in_flight[m] = asyncio.create_task(run_with_sem(by_name[m])); pending.add(in_flight[m])
         return blackboard
 
+    # --- Hallucination-hardening utilities ---
+    @staticmethod
+    def _normalize_claim(c: Mapping[str, Any]) -> Tuple[str, str, Any, bool]:
+        """Canonical key for set comparisons: (subject, predicate, object, polarity)."""
+        subj = str(c.get("subject", "")).strip().lower()
+        pred = str(c.get("predicate", "")).strip().lower()
+        obj = c.get("object", None)
+        pol = bool(c.get("polarity", True))
+        return (subj, pred, obj, pol)
+
+    async def _extract_claims(self, text: str) -> Tuple[List[Dict[str, Any]], Set[Tuple[str, str, Any, bool]], float]:
+        """Run claim extractor; return (raw_claims, normalized_set, avg_conf)."""
+        try:
+            data = await _llm_json_phase(
+                self.planner_llm,
+                "EXTRACT_CLAIMS",
+                _fmt(CLAIMS_EXTRACT_PROMPT, content=_sanitize_text(text)),
+                temperature=0.0, timeout=20.0, max_retries=1
+            )
+            claims = [c for c in (data.get("claims") or []) if isinstance(c, dict)]
+        except Exception:
+            claims = []
+        norm = {self._normalize_claim(c) for c in claims}
+        confs = [float(c.get("confidence", 0.5)) for c in claims if isinstance(c.get("confidence", None), (int, float, str))]
+        # tolerate string confidences
+        try:
+            confs = [float(x) for x in confs]
+        except Exception:
+            confs = [0.5 for _ in claims]
+        avg_conf = sum(confs) / len(confs) if confs else 0.0
+        return (claims, norm, avg_conf)
+
+    async def _consistency_sample_and_select(
+        self,
+        first_prompt: str,
+        node: Node,
+        base_ctx: Mapping[str, Any],
+    ) -> SolverResult:
+        """
+        Generate K candidates; score by inter-candidate agreement on extracted claims.
+        If tie, prefer higher judge-weighted quality.
+        """
+        K = max(2, int(self.config.consistency_samples))
+        # 1) Generate candidates
+        candidates: List[SolverResult] = []
+        claim_sets: List[Set[Tuple[str, str, Any, bool]]] = []
+        raw_claims: List[List[Dict[str, Any]]] = []
+        for i in range(K):
+            ctx = dict(base_ctx)
+            ctx["seed"] = random.randint(1, 1_000_000)
+            ctx["temperature"] = 0.7 if i else 0.4
+            res = await self._hedged_solve(first_prompt, ctx, timeout=self.config.node_timeout_sec)
+            text = _strip_internal_markers(res.text)
+            candidates.append(SolverResult(text=text, total_tokens=res.total_tokens))
+            claims, norm, _ = await self._extract_claims(text)
+            raw_claims.append(claims); claim_sets.append(norm)
+
+        # 2) Compute agreement score (mean Jaccard to others)
+        def jaccard(a: Set[Any], b: Set[Any]) -> float:
+            if not a and not b: return 1.0
+            if not a or not b: return 0.0
+            inter = len(a & b); union = len(a | b)
+            return inter / max(1, union)
+        agreements: List[float] = []
+        for i in range(K):
+            peers = [j for j in range(K) if j != i]
+            if not peers:
+                agreements.append(0.0); continue
+            agreements.append(sum(jaccard(claim_sets[i], claim_sets[j]) for j in peers) / len(peers))
+
+        # 3) If needed, use judges to break ties
+        best_idx = max(range(K), key=lambda i: agreements[i])
+        tied = [i for i, a in enumerate(agreements) if abs(a - agreements[best_idx]) < 1e-6]
+        if len(tied) > 1:
+            scored: List[Tuple[float, int]] = []
+            for i in tied:
+                crits = await self._run_judges(candidates[i].text, node.contract)
+                scored.append((self.deliberate_judges(crits), i))
+            scored.sort(reverse=True)
+            best_idx = scored[0][1]
+
+        chosen = candidates[best_idx]
+        chosen_agreement = agreements[best_idx]
+
+        # 4) Hedge if agreement below threshold
+        if chosen_agreement < float(self.config.agreement_threshold):
+            # Package low-confidence claims from the winning candidate for guidance
+            low_claims = [{"subject": s, "predicate": p, "object": o, "polarity": pol} for (s, p, o, pol) in list(claim_sets[best_idx])][:12]
+            try:
+                hedged_raw = await self.planner_llm.complete(
+                    _fmt(HEDGE_UNCERTAINTY_PROMPT, text=chosen.text, claims=json.dumps(low_claims, ensure_ascii=False)),
+                    temperature=0.0, timeout=20.0
+                )
+                hedged = _sanitize_text(hedged_raw).strip()
+                if hedged:
+                    chosen = SolverResult(text=hedged, total_tokens=chosen.total_tokens)
+            except Exception:
+                pass
+        return chosen
+
+    async def _extract_and_store_claims(self, *, node: Node, content: str) -> None:
+        """LLM-enforced claim extraction → belief store."""
+        try:
+            base = _fmt(CLAIMS_EXTRACT_PROMPT, content=_sanitize_text(content))
+            data = await _llm_json_phase(self.planner_llm, "EXTRACT_CLAIMS", base, temperature=0.0, timeout=20.0, max_retries=1)
+            claims = data.get("claims") or []
+            if isinstance(claims, list) and self._current_sig and self.run_id:
+                self.memory.add_beliefs(sig=self._current_sig, node=node.name, run_id=self.run_id, claims=claims)
+        except Exception as e:
+            _LOG.warning("claim extraction failed for node=%s: %s", node.name, e)
+
     @staticmethod
     def _compose(plan: Plan, blackboard: Dict[str, Artifact], include_resolution: str = "") -> str:
         parts: List[str] = []
@@ -2051,7 +2328,8 @@ class Orchestrator:
             sec = str(n.contract.format.get("markdown_section") or "").strip() or n.name.title()
             hdr_ok, _ = _ensure_header(art.content, sec)
             cleaned = _strip_internal_markers(art.content)
-            body = cleaned if hdr_ok else f"## {sec}\n\n{cleaned.strip()}"
+            # Do not clobber an existing top header if it already matches; otherwise inject.
+            body = cleaned if hdr_ok else (f"## {sec}\n\n{cleaned.strip()}" if cleaned.strip() else f"## {sec}\n")
             parts.append(body.strip())
         if include_resolution:
             parts.append(include_resolution.strip())
@@ -2110,32 +2388,81 @@ class Orchestrator:
         self._current_query = query
         monitor = asyncio.create_task(self.Homeostat().monitor(self))
         try:
-            agents = await self.generate_agents(query)
-            raw_bb = await self.blackboard_cycle(query, agents)
-            blackboard = {
-                k: Artifact(node=k, content=v, qa=QAResult(ok=True), critiques=[])
-                for k, v in raw_bb.items()
-            }
+            # === 1) Build a plan (mission > CQAP > fallback planner) ===
+            plan: Optional[Plan] = None
+            if self.mission_plan and self.config.plan_from_meta:
+                try:
+                    plan = build_plan_from_mission(self.mission_plan, query=query)
+                except Exception as e:
+                    _LOG.warning("mission→plan failed: %s", e)
+                    plan = None
+            if plan is None and self.config.use_cqap and self.cqap and self.config.use_llm_cqap:
+                try:
+                    meta = await _llm_json_phase(self.planner_llm, "CQAP", _cqap_meta_prompt(query, self.cqap), temperature=0.0, timeout=40.0, max_retries=1)
+                    plan = build_plan_from_cqap(query, meta or {}, cls)
+                except Exception as e:
+                    _LOG.warning("cqap→plan failed: %s", e)
+                    plan = None
+            if plan is None:
+                plan = await make_plan(self.planner_llm, query, cls)
+
+            # === 2) Execute DAG with adaptive parallelism ===
+            blackboard = await self.adaptive_run_dag(plan.nodes)
+            self._last_artifacts = blackboard  # for forecasting
+
+            # Extract beliefs from artifacts of this run
+            for n in plan.nodes:
+                a = blackboard.get(n.name)
+                if a and a.content:
+                    await self._extract_and_store_claims(node=n, content=a.content)
+
+            # === 3) Detect & resolve conflicts at belief layer ===
+            beliefs_scope = self.memory.beliefs_for_sig(sig)
+            bconf = self.memory.detect_belief_conflicts(scope_sig=sig)
+            resolution = await draft_resolution(self.solver, bconf, beliefs_scope) if bconf else ""
+            if bconf:
+                try:
+                    self.memory.penalize_kline(sig)
+                except Exception:
+                    pass
+
+            # === 4) Compose and cohesion pass ===
+            composed = self._compose(plan, blackboard, include_resolution=resolution)
+            global_recs, final_cohesive = await self._cohesion_pass(query, composed, [], resolution)
+
+            # Optional dense final enrichment: transform composed doc into an executive-quality answer.
+            final_pre_dense = final_cohesive
+            if self.config.dense_final_enable:
+                try:
+                    enriched = await self._hedged_solve(
+                        _fmt(DENSE_FINAL_ANSWER_PROMPT, document=final_cohesive),
+                        {"mode": "dense_final"},
+                        timeout=45.0,
+                    )
+                    text = _sanitize_text(enriched.text).strip()
+                    if text:
+                        final_cohesive = text
+                except Exception:
+                    # If enrichment fails, keep the cohesive draft.
+                    pass
+
+            # Reflective learning: update self-model from run summary
             try:
-                self._last_artifacts = blackboard
+                model = await self.reflective_learning({
+                    "run_id": run_id,
+                    "classification": {"kind": cls.kind, "score": cls.score},
+                    "global_recs": global_recs,
+                    "energy": getattr(self, "_last_energy", None),
+                })
+                if model:
+                    self.memory.store_self_model(sig, model)
             except Exception:
                 pass
-            arts = list(blackboard.values())
-            conflicts = detect_cross_contradictions(arts)
-            resolution = await draft_resolution(self.solver, conflicts, blackboard) if conflicts else ""
-            subjects = sorted({s for _, _, s in conflicts}) if conflicts else []
-            if conflicts:
-                for _ in subjects:
-                    try:
-                        self.memory.penalize_kline(sig)
-                    except Exception:
-                        pass
-            final = "\n\n".join(a.content for a in arts)
-            global_recs, final_cohesive = await self._cohesion_pass(query, final, conflicts, resolution)
+
             try:
                 self.memory.upsert_kline(
                     sig,
-                    {"agents": [a["role"] for a in agents], "global_recs": global_recs[:8], "run": run_id},
+                    {"global_recs": global_recs[:8], "run": run_id},
                     query=query,
                     classification={"kind": cls.kind, "score": cls.score},
                 )
@@ -2148,14 +2475,15 @@ class Orchestrator:
             result = {
                 "classification": {"kind": cls.kind, "score": cls.score},
                 "artifacts": {k: {"content": v.content, "status": v.status, "recommendations": v.recommendations} for k, v in blackboard.items()},
-                "conflicts": conflicts,
+                "belief_conflicts": bconf,
                 "resolution": resolution,
-                "final_pre_cohesion": final,
+                "final_pre_cohesion": composed,
+                "final_pre_dense": final_pre_dense if self.config.dense_final_enable else final_cohesive,
                 "final": final_cohesive,
                 "global_recommendations": global_recs,
                 "run_id": run_id,
             }
-            return {**result, "agents": [a["role"] for a in agents]}
+            return result
         finally:
             monitor.cancel()
 
@@ -2391,11 +2719,7 @@ async def _demo() -> None:
     print(result["final"])
 
     print("\n===== 📋 PLAN =====")
-    plan = result.get("plan")
-    if plan is not None:
-        print(json.dumps(plan, indent=2))
-    else:
-        print("(no plan)")
+    print("(plan executed internally; inspect artifacts for sections)")
 
     print("\n===== 🧩 ARTIFACTS =====")
     for k, v in result["artifacts"].items():
@@ -2404,8 +2728,8 @@ async def _demo() -> None:
         if v["recommendations"]:
             print("🔧 Recs:", ", ".join(v["recommendations"]))
 
-    print("\n===== ⚖️ CONFLICTS =====")
-    print(result["conflicts"] or "none")
+    print("\n===== ⚖️ BELIEF CONFLICTS =====")
+    print(result.get("belief_conflicts") or "none")
 
     print("\n===== 🪄 RESOLUTION =====")
     print(result["resolution"] or "(none)")
