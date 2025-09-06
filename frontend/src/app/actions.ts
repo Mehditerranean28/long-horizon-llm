@@ -117,6 +117,12 @@ async function queryLocalLLM(
   if (!targetUrl) {
     throw new LocalLLMError('Local LLM URL is not configured.');
   }
+  // Prevent accidental routing to the main backend API which does not expose
+  // the Ollama-style ``/api/chat`` endpoint.  If misconfigured, raise a
+  // typed error so callers can gracefully fall back to the backend pipeline.
+  if (BACKEND_API_URL && targetUrl.startsWith(BACKEND_API_URL)) {
+    throw new LocalLLMError('Local LLM URL points to backend API.');
+  }
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10000);
@@ -525,13 +531,17 @@ const backendAnswerQuestionAction: ActionHandler<AnswerQuestionInput, AnswerQues
 
     if (provider === 'client-local') {
       logMetric('BACKEND: Routing to local LLM for answerQuestionAction');
-      const answer = await queryLocalLLM(
-        input.question,
-        _model || '',
-        COGNITIVE_PROMPT,
-        provider === 'client-local' ? modelUrl : undefined,
-      );
-      return { answer, mockEvidenceSegments: [], queued: false, correlationId: uuidv4() };
+      try {
+        const answer = await queryLocalLLM(
+          input.question,
+          _model || '',
+          COGNITIVE_PROMPT,
+          provider === 'client-local' ? modelUrl : undefined,
+        );
+        return { answer, mockEvidenceSegments: [], queued: false, correlationId: uuidv4() };
+      } catch (err) {
+        logWarn('Local LLM unavailable, falling back to backend', err as Error);
+      }
     } else if (provider === 'transformersjs') {
       logMetric('BACKEND: Routing to transformersjs for answerQuestionAction');
       const answer = await queryBrowserLLM(input.question);
@@ -614,13 +624,17 @@ const backendGenerateClarificationAction: ActionHandler<GenerateClarificationInp
 
     if (provider === 'client-local') {
       logMetric('BACKEND: Routing to local LLM for generateClarificationAction');
-      const text = await queryLocalLLM(
-        query,
-        model || '',
-        CLARIFICATION_PROMPT,
-        provider === 'client-local' ? modelUrl : undefined
-      );
-      return { clarificationText: text, mockEvidenceSegments: [], queued: false, correlationId: uuidv4() };
+      try {
+        const text = await queryLocalLLM(
+          query,
+          model || '',
+          CLARIFICATION_PROMPT,
+          provider === 'client-local' ? modelUrl : undefined
+        );
+        return { clarificationText: text, mockEvidenceSegments: [], queued: false, correlationId: uuidv4() };
+      } catch (err) {
+        logWarn('Local LLM unavailable, falling back to backend', err as Error);
+      }
     } else if (provider === 'transformersjs') {
       logMetric('BACKEND: Routing to transformersjs for generateClarificationAction');
       const text = await queryBrowserLLM(query);
@@ -675,13 +689,17 @@ const backendDeepResearchAction: ActionHandler<DeepResearchInput, DeepResearchOu
 
     if (provider === 'client-local') {
       logMetric('BACKEND: Routing to local LLM for deepResearchAction');
-      const summary = await queryLocalLLM(
-        query,
-        model || '',
-        DEEP_RESEARCH_PROMPT,
-        provider === 'client-local' ? modelUrl : undefined
-      );
-      return { summary, nodes: [], edges: [], mockEvidenceSegments: [], queued: false, correlationId: uuidv4() };
+      try {
+        const summary = await queryLocalLLM(
+          query,
+          model || '',
+          DEEP_RESEARCH_PROMPT,
+          provider === 'client-local' ? modelUrl : undefined
+        );
+        return { summary, nodes: [], edges: [], mockEvidenceSegments: [], queued: false, correlationId: uuidv4() };
+      } catch (err) {
+        logWarn('Local LLM unavailable, falling back to backend', err as Error);
+      }
     } else if (provider === 'transformersjs') {
       logMetric('BACKEND: Routing to transformersjs for deepResearchAction');
       const summary = await queryBrowserLLM(query);
@@ -734,13 +752,17 @@ const backendSimpleChatAction: ActionHandler<AnswerQuestionInput, AnswerQuestion
 
     if (provider === 'client-local') {
       logMetric('BACKEND: Routing to local LLM for simpleChatAction');
-      const answer = await queryLocalLLM(
-        payload.query,
-        model || '',
-        SIMPLE_CHAT_PROMPT,
-        provider === 'client-local' ? modelUrl : undefined
-      );
-      return { answer, mockEvidenceSegments: [], queued: false, correlationId: uuidv4() };
+      try {
+        const answer = await queryLocalLLM(
+          payload.query,
+          model || '',
+          SIMPLE_CHAT_PROMPT,
+          provider === 'client-local' ? modelUrl : undefined
+        );
+        return { answer, mockEvidenceSegments: [], queued: false, correlationId: uuidv4() };
+      } catch (err) {
+        logWarn('Local LLM unavailable, falling back to backend', err as Error);
+      }
     } else if (provider === 'transformersjs') {
       logMetric('BACKEND: Routing to transformersjs for simpleChatAction');
       const answer = await queryBrowserLLM(payload.query);

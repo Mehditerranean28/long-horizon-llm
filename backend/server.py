@@ -402,19 +402,11 @@ async def genai_endpoint(
     return GenAIResponse(request_id=x_request_id, duration_ms=dt_ms, output=out or "")
 
 
-_ASCII = r"""
-        ███████╗ ██████╗ ██╗   ██╗███████╗██████╗ ███████╗██╗ ██████╗ ███╗   ██╗
-        ██╔════╝██╔═══██╗██║   ██║██╔════╝██╔══██╗██╔════╝██║██╔═══  ╗████╗  ██║
-        ███████╗██║   ██║██║   ██║█████╗  ██████╔╝█████╗  ██║██║     ║██╔██╗ ██║
-        ╚════██║██║   ██║ █║   █ ║██╔══╝  ██╔══██╗██╔══╝  ██║██║ ████║██║╚██╗██║
-        ███████║╚██████╔╝╚ ████ ╔╝███████╗██║  ██║███████╗██║╚██████╔╝██║ ╚████║
-        ╚══════╝ ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝╚══════╝╚═╝ ╚═════╝ ╚═╝  ╚═══╝
-"""
-
-
 def main() -> None:
+    """Launch a development server."""
+
     import uvicorn
-    print(_ASCII)
+
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "8000"))
     reload_ = bool(int(os.getenv("RELOAD", "0")))
