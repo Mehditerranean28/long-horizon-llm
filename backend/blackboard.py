@@ -2408,7 +2408,7 @@ class Orchestrator:
 
             # === 2) Execute DAG with adaptive parallelism ===
             blackboard = await self.adaptive_run_dag(plan.nodes)
-            self._last_artifacts = blackboard  # for forecasting
+            #self._last_artifacts = blackboard  # for forecasting
 
             # Extract beliefs from artifacts of this run
             for n in plan.nodes:
