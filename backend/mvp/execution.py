@@ -90,6 +90,7 @@ class Orchestrator:
         self._current_sig: Optional[str] = None
         self._current_query: str = ""
         self._last_artifacts: Dict[str, Artifact] = {}
+        LOG.debug("Orchestrator initialized with config %s", config)
 
     # ------------------------------- Utilities --------------------------------
 
@@ -101,27 +102,33 @@ class Orchestrator:
 
     async def _reserve_tokens(self, n: int) -> bool:
         async with self._token_lock:
-            if self._tokens_used + n > self.config.max_tokens_per_run:
-                return False
-            self._tokens_used += n
-            return True
+            ok = self._tokens_used + n <= self.config.max_tokens_per_run
+            if ok:
+                self._tokens_used += n
+            LOG.debug("Reserve %d tokens -> %s (used=%d)", n, ok, self._tokens_used)
+            return ok
 
     def _add_tokens(self, used: int) -> None:
         self._tokens_used += used
+        LOG.debug("Add tokens %d total=%d", used, self._tokens_used)
 
     def forecast_tokens(self, remaining_nodes: int) -> int:
         rates = [approx_tokens(art.content) for art in self._last_artifacts.values()][-12:]
         if not rates:
+            LOG.debug("No history for forecast; using default")
             return FORECAST_DEFAULT_TOKENS
         s = rates[0]
         for r in rates[1:]:
             s = FORECAST_ALPHA * r + (1 - FORECAST_ALPHA) * s
-        return int(s * remaining_nodes * FORECAST_BUFFER)
+        forecast = int(s * remaining_nodes * FORECAST_BUFFER)
+        LOG.debug("Forecast tokens for %d nodes -> %d", remaining_nodes, forecast)
+        return forecast
 
     # ------------------------------- Hedging ----------------------------------
 
     async def _hedged_solve(self, task: str, context: Mapping[str, Any], timeout: float) -> str:
         """Dual-shot hedged call; returns winning text or raises on both failure."""
+        LOG.debug("Hedged solve start mode=%s", context.get("mode"))
         async def _call():
             async with GLOBAL_LIMITER.slot():
                 res = await asyncio.wait_for(self.solver.solve(task, context), timeout=timeout)
@@ -135,16 +142,19 @@ class Orchestrator:
 
         backup = asyncio.create_task(_delayed_call())
 
+        start = time.time()
         done, pending = await asyncio.wait({primary, backup}, return_when=asyncio.FIRST_COMPLETED)
         winner = next(iter(done))
         result = await winner
         for p in pending:
             p.cancel()
+        LOG.debug("Hedged solve finished in %.2fs", time.time() - start)
         return result
 
     # ---------------------------- Judges orchestration ------------------------
 
     async def _run_judges(self, text: str, contract: Contract) -> List[Critique]:
+        LOG.debug("Running %d judges", len(self.judges))
         async def _one(j) -> Critique:
             return await j.critique(text, contract)
 
@@ -152,6 +162,7 @@ class Orchestrator:
         crits = [r for r in results if isinstance(r, Critique)]
         for j, c in zip(self.judges, crits):
             delta = (c.score - 0.7) * 0.12
+            LOG.info("Judge %s score=%.2f", j.name, c.score)
             self.memory.bump_judge(j.name, delta)
         self.memory.save()
         return crits
@@ -159,6 +170,7 @@ class Orchestrator:
     # ------------------------------- Node exec --------------------------------
 
     def _build_context(self, node: Node, blackboard: Dict[str, Artifact], token_budget: int = 1000) -> str:
+        LOG.debug("Building context for node %s", node.name)
         parts: List[str] = []
         used = 0
         for d in node.deps:
@@ -199,10 +211,12 @@ class Orchestrator:
         return "\n".join(previews) if previews else ""
 
     async def _recommend_node(self, node: Node, content: str) -> Tuple[str, List[str], QAResult, List[Critique]]:
+        LOG.debug("Recommendation step for node %s", node.name)
         prompt = fmt(NODE_RECOMMEND_PROMPT, section=node.contract.format.get("markdown_section"), content=content)
         rec_json = await self._hedged_solve(prompt, {"mode": "node_recommend", "node": node.name}, timeout=12.0)
         data = safe_json_loads(first_json_object(rec_json) or "{}")
         recommendations = [str(x) for x in data.get("recommendations", [])][:10]
+        LOG.info("Node %s got %d recommendations", node.name, len(recommendations))
         if recommendations and self.config.apply_node_recs:
             apply_prompt = fmt(NODE_APPLY_PROMPT, recs="\n- ".join(recommendations), content=content)
             revised = await self._hedged_solve(apply_prompt, {"mode": "node_apply", "node": node.name}, timeout=25.0)
@@ -214,11 +228,12 @@ class Orchestrator:
         return content, recommendations, qa, critiques
 
     async def _execute_node(self, node: Node, blackboard: Dict[str, Artifact]) -> Artifact:
+        LOG.info("Executing node %s", node.name)
         if self.on_node_start:
             try:
                 await self.on_node_start(node.name)
-            except Exception:
-                pass
+            except Exception as e:
+                LOG.error("on_node_start hook failed: %s", e)
 
         # Create prompt
         context_txt = self._build_context(node, blackboard, token_budget=min(1000, self.config.kline_hint_tokens))
@@ -243,11 +258,13 @@ class Orchestrator:
         if self.on_node_complete:
             try:
                 await self.on_node_complete(art)
-            except Exception:
-                pass
+            except Exception as e:
+                LOG.error("on_node_complete hook failed: %s", e)
+        LOG.info("Node %s completed with status=%s", node.name, status)
         return art
 
     async def adaptive_run_dag(self, nodes: List[Node]) -> Dict[str, Artifact]:
+        LOG.info("Starting adaptive DAG run with %d nodes", len(nodes))
         name_to = {n.name: n for n in nodes}
         indeg: Dict[str, int] = {n.name: 0 for n in nodes}
         succ: Dict[str, List[str]] = {n.name: [] for n in nodes}
@@ -276,6 +293,7 @@ class Orchestrator:
                 try:
                     art = await t
                 except Exception as e:
+                    LOG.error("Node %s failed: %s", node_name, e)
                     art = Artifact(
                         node=node_name or "unknown",
                         content=f"(no content)\n\nError: {e}",
@@ -284,6 +302,7 @@ class Orchestrator:
                         status="failed",
                     )
                 blackboard[art.node] = art
+                LOG.info("Node %s finished", art.node)
                 for m in succ.get(art.node, []):
                     indeg[m] -= 1
                     if indeg[m] == 0 and m not in in_flight and m not in blackboard:
@@ -294,12 +313,14 @@ class Orchestrator:
     # ---------------------------- Beliefs extraction --------------------------
 
     async def _extract_and_store_claims(self, *, node: Node, content: str) -> None:
+        LOG.debug("Extracting claims for node %s", node.name)
         base = fmt(CLAIMS_EXTRACT_PROMPT, content=sanitize_text(content))
         raw = await self.planner_llm.complete("SYSTEM: EXTRACT_CLAIMS\nReturn ONLY JSON.\n" + base, temperature=0.0, timeout=25.0)
         data = safe_json_loads(first_json_object(raw) or "{}") or {}
         claims = data.get("claims", [])
         if claims and self._current_sig and self.run_id:
             self.memory.add_beliefs(sig=self._current_sig, node=node.name, run_id=self.run_id, claims=claims)
+            LOG.info("Stored %d claims for node %s", len(claims), node.name)
 
     # ---------------------------- Composition & cohesion ----------------------
 
@@ -330,6 +351,7 @@ class Orchestrator:
     async def _cohesion_pass(
         self, query: str, composed: str, conflicts: List[Tuple[str, str, str]], resolution: str
     ) -> Tuple[List[str], str]:
+        LOG.debug("Cohesion pass with %d conflicts", len(conflicts))
         prompt = fmt(COHESION_PROMPT, query=query, conflicts=json.dumps(conflicts), resolution=resolution, document=composed)
         res_json = await self._hedged_solve(prompt, {"mode": "cohesion"}, timeout=50.0)
         data = safe_json_loads(first_json_object(res_json) or "{}")
@@ -338,22 +360,26 @@ class Orchestrator:
         if self.config.apply_global_recs and recs:
             apply_prompt = fmt(COHESION_APPLY_PROMPT, recs="\n- ".join(recs), document=revised)
             revised = await self._hedged_solve(apply_prompt, {"mode": "cohesion_apply"}, timeout=50.0)
+        LOG.info("Cohesion produced %d recommendations", len(recs))
         return recs, revised
 
     # --------------------------------- Run ------------------------------------
 
     async def run(self, query: str) -> Dict[str, Any]:
+        LOG.info("Run starting for query: %s", query)
         self._tokens_used = 0
         run_id = uuid.uuid4().hex[:8]
         self.run_id = run_id
         AUDIT.info(json.dumps({"orchestrator_start": {"run_id": run_id, "query": query}}, ensure_ascii=False))
 
         cls = await classify_query_llm(query, self.planner_llm)
+        LOG.info("Query classified kind=%s score=%.3f", cls.kind, cls.score)
         sig = self._sig(query, cls.kind)
         self._current_sig = sig
         self._current_query = query
 
         plan = await make_plan(self.planner_llm, query, cls)
+        LOG.info("Plan generated with %d nodes", len(plan.nodes))
 
         monitor = asyncio.create_task(self._monitor_homeostat())
         try:
@@ -385,8 +411,8 @@ class Orchestrator:
                 model = safe_json_loads(first_json_object(raw) or "{}") or {}
                 if model:
                     self.memory.store_self_model(sig, model)
-            except Exception:
-                pass
+            except Exception as e:
+                LOG.error("Self-model update failed: %s", e)
 
             self.memory.upsert_kline(sig, {"global_recs": global_recs[:10], "run": run_id}, query=query, classification={"kind": cls.kind, "score": cls.score})
 
@@ -400,6 +426,7 @@ class Orchestrator:
                 "global_recommendations": global_recs,
                 "run_id": run_id,
             }
+            LOG.info("Run %s completed", run_id)
             return result
         finally:
             monitor.cancel()
@@ -414,9 +441,12 @@ class Orchestrator:
                 scores = [c.score for a in self._last_artifacts.values() for c in a.critiques]
                 avg_score = sum(scores) / len(scores) if scores else 0.0
                 failures = sum(1 for a in self._last_artifacts.values() if a.status != "ok")
+                LOG.debug("Homeostat avg_score=%.2f failures=%d", avg_score, failures)
                 if failures > 3:
                     self.config.max_rounds += 1
+                    LOG.info("Increasing max_rounds to %d", self.config.max_rounds)
                 elif avg_score > 0.92:
                     self.config.max_rounds = max(1, self.config.max_rounds - 1)
+                    LOG.info("Decreasing max_rounds to %d", self.config.max_rounds)
         except asyncio.CancelledError:
             return

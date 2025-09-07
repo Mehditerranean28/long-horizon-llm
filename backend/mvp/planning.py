@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Mapping, Optional
 
 from constants import PLANNER_PROMPT  # prompt strings live in constants.py
 from bb_types import Classification, Contract, Node, Plan, TestSpec
-from utils import fmt, first_json_object, safe_json_loads, slug
+from utils import LOG, fmt, first_json_object, safe_json_loads, slug
 
 # Heuristics for classifier
 _DELIVERABLE = re.compile(r"\b(design|architecture|spec|contract|roadmap|benchmark|compare|trade[- ]?offs?|rfc|plan|protocol|implementation|experiment|evaluate)\b", re.I)
@@ -20,6 +20,7 @@ _VERBS = re.compile(r"\b(\w+?)(?:ed|ing|e|ify|ise|ize)\b", re.I)
 
 def classify_query(query: str) -> Classification:
     q = query.strip()
+    LOG.debug("Heuristic classify query: %s", q)
     wc = len(re.findall(r"\b\w+\b", q))
     score = (
         0.34 * min(1.0, len(_DELIVERABLE.findall(q)) / 3)
@@ -29,11 +30,13 @@ def classify_query(query: str) -> Classification:
         + 0.10 * min(1.0, len(_VERBS.findall(q)) / 14)
     )
     kind = "Atomic" if score < 0.25 else "Hybrid" if score < 0.55 else "Composite"
+    LOG.info("Heuristic classification kind=%s score=%.3f", kind, score)
     return Classification(kind, round(score, 3))
 
 
 async def classify_query_llm(query: str, llm, *, timeout: float = 15.0) -> Classification:
     if llm is None:
+        LOG.debug("No LLM provided; using heuristic classification")
         return classify_query(query)
     schema_hint = '{ "kind":"Atomic|Hybrid|Composite","score":0..1,"rationale":"...","cues":{...} }'
     prompt = f"SYSTEM: CLASSIFY\nReturn ONLY JSON.\nSchema: {schema_hint}\nTask: Classify scope/complexity.\nQUERY: {query}"
@@ -42,8 +45,11 @@ async def classify_query_llm(query: str, llm, *, timeout: float = 15.0) -> Class
         data = safe_json_loads(first_json_object(raw) or "{}"); data = data or {}
         kind = str(data.get("kind", "Atomic"))
         score = float(data.get("score", 0.5))
+        LOG.info("LLM classification kind=%s score=%.3f", kind, score)
         return Classification(kind, score)
-    except Exception:
+    except Exception as e:
+        LOG.error("LLM classification failed: %s", e)
+        LOG.info("Falling back to heuristic classification")
         return classify_query(query)
 
 
@@ -103,11 +109,13 @@ def _validate_and_repair_plan(nodes: List[Node]) -> List[Node]:
 
 async def make_plan(planner_llm, query: str, cls: Classification) -> Plan:
     """Ask LLM for a plan; fallback to one-node plan if needed."""
+    LOG.info("Requesting plan for class=%s", cls.kind)
     hints = ""
     raw = await planner_llm.complete(fmt(PLANNER_PROMPT, q=query, hints=hints), temperature=0.0, timeout=70.0)
     blob = first_json_object(raw) or "{}"
     data = safe_json_loads(blob) or {}
     raw_nodes = data.get("nodes", []) if isinstance(data, dict) else []
+    LOG.debug("Planner returned nodes: %s", raw_nodes)
     nodes: List[Node] = []
     seen = set()
     for i, nd in enumerate(raw_nodes):
@@ -124,6 +132,7 @@ async def make_plan(planner_llm, query: str, cls: Classification) -> Plan:
         nodes.append(Node(name, tmpl, deps, contract, role, prompt_override))
 
     if not nodes:
+        LOG.warning("Planner produced no nodes; using fallback")
         nodes = [Node("answer", "GENERIC", [], mk_contract("Answer", min_words=120), "backbone")]
 
     # Size trim by complexity
@@ -134,4 +143,6 @@ async def make_plan(planner_llm, query: str, cls: Classification) -> Plan:
     else:
         nodes = nodes[: max(4, min(8, len(nodes)))]
 
-    return Plan(nodes=_validate_and_repair_plan(nodes))
+    nodes = _validate_and_repair_plan(nodes)
+    LOG.info("Final plan has %d nodes", len(nodes))
+    return Plan(nodes=nodes)

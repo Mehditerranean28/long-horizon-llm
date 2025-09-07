@@ -7,6 +7,7 @@ from typing import Mapping, Optional
 
 from constants import ANALYSIS_NODE_PROMPT, ANSWER_NODE_PROMPT, EXAMPLES_NODE_PROMPT
 from bb_types import PlannerLLM, SolverResult
+from utils import LOG
 
 
 class EchoSolver:
@@ -15,6 +16,7 @@ class EchoSolver:
     async def solve(self, task: str, context: Optional[Mapping[str, object]] = None) -> SolverResult:
         section = str((context or {}).get("node", "Answer")).replace("-", " ").title()
         text = f"## {section}\n\n{task.strip()}\n"
+        LOG.debug("EchoSolver returning section %s", section)
         return SolverResult(text=text, total_tokens=len(text) // 4)
 
 
@@ -23,6 +25,7 @@ class PromptLLM:
 
     async def complete(self, prompt: str, *, temperature: float = 0.0, timeout: float = 60.0) -> str:
         import json
+        LOG.debug("PromptLLM returning static plan")
 
         plan = {
             "nodes": [
@@ -60,6 +63,8 @@ class PromptLLM:
 
 async def build_default_solver_and_planner(use_mock_llm: bool = True):
     """Factory for demo fallbacks."""
+    LOG.info("Building default solver and planner (use_mock_llm=%s)", use_mock_llm)
     solver = EchoSolver()
     planner = PromptLLM()
+    LOG.debug("Created EchoSolver=%s PromptLLM=%s", solver, planner)
     return solver, planner

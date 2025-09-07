@@ -27,21 +27,13 @@ from config import (
 )
 
 # ------------------------------- Logging --------------------------------------
+from backend.kern.src.kern.core import init_logging
+
+init_logging()
 
 LOG = logging.getLogger("blackboard")
-if not LOG.handlers:
-    _h = logging.StreamHandler()
-    _h.setFormatter(logging.Formatter("[%(levelname)s] %(name)s: %(message)s"))
-    LOG.addHandler(_h)
-    LOG.setLevel(logging.INFO)
-
 AUDIT = logging.getLogger("blackboard.audit")
-if not AUDIT.handlers:
-    _ah = logging.StreamHandler()
-    _ah.setFormatter(logging.Formatter("%(message)s"))
-    AUDIT.addHandler(_ah)
-    AUDIT.setLevel(logging.INFO)
-    AUDIT.propagate = False
+AUDIT.propagate = False
 
 
 # --------------------------- Text & JSON helpers ------------------------------
