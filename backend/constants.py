@@ -21,6 +21,50 @@ PLANNER_PROMPT = (
     "{q}\n"
 )
 
+# === Mission planning / adapters ===
+MISSION_START_TOKEN = "<<<MISSION_JSON>>>"
+MISSION_END_TOKEN = "<<<END_MISSION>>>"
+
+MISSION_PLANNER_PROMPT = (
+    "You are a mission planner. Return STRICT JSON and nothing else.\n\n"
+    "Schema (target):\n"
+    "{\n"
+    '  "query_context": "string",\n'
+    '  "Strategy": [\n'
+    '    {\n'
+    '      "Objective": "string",\n'
+    '      "queries": {"Q1": "string", "...": "..."},\n'
+    '      "tactics": [\n'
+    '        { "t1": "string", "dependencies": ["string"], "expected_artifact": "string" },\n'
+    '        { "t2": "string", "dependencies": ["string"], "expected_artifact": "string" }\n'
+    "      ],\n"
+    '      "tenant": ["string"]\n'
+    "    }\n"
+    "  ]\n"
+    "}\n\n"
+    "Rules:\n"
+    "- Use keys exactly as in the schema above. No prose outside JSON.\n"
+    "- Each tactic MUST use a key like t1/t2 as the field that holds the description.\n"
+    "- Provide 2–4 tactics per objective. Keep identifiers unique within each objective.\n"
+)
+
+PLANNER_SYSTEM_PROMPT = (
+    "You are a planning model. Return STRICT JSON and nothing else.\n\n"
+    "JSON schema:\n"
+    "{\n"
+    '  "triage": "atomic" | "composite" | "hybrid",\n'
+    '  "nodes": [ {"id":"string","text":"string","deps":["id"]} ],\n'
+    '  "stitch": { "sections": [ {"title":"string","requires":["id"],"must_contain":["string"]} ] }\n'
+    "}\n\n"
+    "Rules:\n"
+    "- If 'atomic', 'nodes' may be empty; include one 'Answer' section.\n"
+    "- Nodes must be granular and form a DAG via 'deps'.\n"
+)
+
+DEFAULT_PIPELINE_GUIDELINES = (
+    "Be precise and fully actionable. Prefer explicit tests and base conditions."
+)
+
 from prompts.cognitive_templates import (
     A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17, A18, A19, A20, A21, A22, A23,
 )

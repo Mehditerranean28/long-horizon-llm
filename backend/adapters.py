@@ -26,12 +26,17 @@ from pipeline import (
     MockLLM,
 )
 
+from constants import (
+    DEFAULT_PIPELINE_GUIDELINES,
+    MISSION_END_TOKEN,
+    MISSION_PLANNER_PROMPT,
+    MISSION_START_TOKEN,
+    PLANNER_SYSTEM_PROMPT,
+)
+
 __all__ = ["PipelineSolver", "PlannerLLM", "build_pipeline_solver_and_planner"]
 
 # --- mission embedding --------------------------------------------------------------------------
-
-MISSION_START = "<<<MISSION_JSON>>>"
-MISSION_END = "<<<END_MISSION>>>"
 
 def _embed_mission(task: str, mission_obj: dict | None) -> str:
     """Embed a mission JSON blob inside the task string."""
@@ -39,49 +44,9 @@ def _embed_mission(task: str, mission_obj: dict | None) -> str:
     if not mission_obj:
         return task
     mission_json = json.dumps(mission_obj, ensure_ascii=False)
-    return f"{MISSION_START}\n{mission_json}\n{MISSION_END}\n\n{task}"
-
-# --- prompts ------------------------------------------------------------------------------------
-
-_MISSION_PLANNER_PROMPT = """\
-You are a mission planner. Return STRICT JSON and nothing else.
-
-Schema (target):
-{
-  "query_context": "string",
-  "Strategy": [
-    {
-      "Objective": "string",
-      "queries": {"Q1": "string", "...": "..."},
-      "tactics": [
-        { "t1": "string", "dependencies": ["string"], "expected_artifact": "string" },
-        { "t2": "string", "dependencies": ["string"], "expected_artifact": "string" }
-      ],
-      "tenant": ["string"]
-    }
-  ]
-}
-
-Rules:
-- Use keys exactly as in the schema above. No prose outside JSON.
-- Each tactic MUST use a key like t1/t2 as the field that holds the description.
-- Provide 2–4 tactics per objective. Keep identifiers unique within each objective.
-"""
-
-_PLANNER_SYSTEM_PROMPT = """\
-You are a planning model. Return STRICT JSON and nothing else.
-
-JSON schema:
-{
-  "triage": "atomic" | "composite" | "hybrid",
-  "nodes": [ {"id":"string","text":"string","deps":["id"]} ],
-  "stitch": { "sections": [ {"title":"string","requires":["id"],"must_contain":["string"]} ] }
-}
-
-Rules:
-- If 'atomic', 'nodes' may be empty; include one 'Answer' section.
-- Nodes must be granular and form a DAG via 'deps'.
-"""
+    return (
+        f"{MISSION_START_TOKEN}\n{mission_json}\n{MISSION_END_TOKEN}\n\n{task}"
+    )
 
 # --- helpers ------------------------------------------------------------------------------------
 
@@ -393,7 +358,7 @@ class PlannerLLM:
         """Plan ``query`` into a DAG or mission-plan."""
 
         prompt = (
-            _MISSION_PLANNER_PROMPT if mode == "mission" else _PLANNER_SYSTEM_PROMPT
+            MISSION_PLANNER_PROMPT if mode == "mission" else PLANNER_SYSTEM_PROMPT
         ) + "\n\nQUERY:\n" + query
         raw = await self._ask(prompt, temperature=0.0)
 
@@ -437,7 +402,7 @@ async def build_pipeline_solver_and_planner(
 
     orch = PipelineOrchestrator(
         llm=llm_for_pipeline,
-        guidelines=guidelines or "Be precise and fully actionable. Prefer explicit tests and base conditions.",
+        guidelines=guidelines or DEFAULT_PIPELINE_GUIDELINES,
         judges=judges,
         config=cfg,
     )
