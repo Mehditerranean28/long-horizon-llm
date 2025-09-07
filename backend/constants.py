@@ -128,6 +128,10 @@ R_TEMPLATES = {
     "R21": R21,
 }
 
+# Legacy aliases for backwards compatibility
+cognitive_queries = {k: v for k, v in A_TEMPLATES.items()}
+reasoning_queries = {k: v for k, v in R_TEMPLATES.items()}
+
 FORBIDDEN_PHRASES = (
     "as an ai language model",
     "as an ai",
