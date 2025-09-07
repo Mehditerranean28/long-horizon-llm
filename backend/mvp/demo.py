@@ -16,6 +16,7 @@ from execution import Orchestrator
 from memory import MemoryStore
 from solver import build_default_solver_and_planner
 from utils import LOG
+from constants import DEFAULT_DEMO_QUERY
 
 
 async def main_async() -> None:
@@ -35,10 +36,7 @@ async def main_async() -> None:
         LOG.debug("Verbose logging enabled")
     LOG.info("Using memory file %s", args.mem)
 
-    query = " ".join(args.query).strip() or (
-        "Design a secure CRUD API. Provide architecture, data model, and risks. "
-        "Compare 2 frameworks and give a migration plan."
-    )
+    query = " ".join(args.query).strip() or DEFAULT_DEMO_QUERY
 
     solver = planner = None
     LOG.info("Building solver and planner (mock=%s)", args.mock)

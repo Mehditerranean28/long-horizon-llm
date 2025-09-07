@@ -13,7 +13,6 @@ import importlib
 import logging
 import os
 import re
-import sys
 import time
 import uuid
 import json
@@ -273,7 +272,7 @@ async def global_exc_handler(request: Request, exc: Exception):
     """Catch-all exception handler returning a generic error payload."""
 
     cid = request.headers.get("x-request-id") or str(uuid.uuid4())
-    log.error("Unhandled error rid=%s: %s", cid, exc, exc_info=True)
+    log.error("Unhandled error rid=%s: %s", cid, exc)
     return JSONResponse(
         status_code=500,
         content=ErrorResponse(detail=str(exc), correlation_id=cid).model_dump(),
@@ -330,7 +329,7 @@ async def run_endpoint(
         log.error("rid=%s timed out after %.1fs", x_request_id, REQUEST_TIMEOUT_SEC)
         raise HTTPException(status_code=504, detail=f"Timeout after {REQUEST_TIMEOUT_SEC:.0f}s")
     except Exception as e:
-        log.exception("rid=%s pipeline failure: %s", x_request_id, e)
+        log.error("rid=%s pipeline failure: %s", x_request_id, e)
         raise HTTPException(status_code=500, detail=f"Pipeline failure: {e}")
     dt_ms = int((time.perf_counter() - t0) * 1000)
 
@@ -364,7 +363,7 @@ async def run_stream_endpoint(
             async for event in ORCH.run_stream(req.query):
                 yield json.dumps(event) + "\n"
         except Exception as e:
-            log.exception("rid=%s stream failure: %s", x_request_id, e)
+            log.error("rid=%s stream failure: %s", x_request_id, e)
             yield json.dumps({"type": "error", "error": str(e)}) + "\n"
 
     return StreamingResponse(event_gen(), media_type="application/x-ndjson")
@@ -396,7 +395,7 @@ async def genai_endpoint(
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail=f"LLM timeout after {req.timeout:.1f}s")
     except Exception as e:
-        log.exception("rid=%s genai failure: %s", x_request_id, e)
+        log.error("rid=%s genai failure: %s", x_request_id, e)
         raise HTTPException(status_code=500, detail=f"LLM failure: {e}")
     dt_ms = int((time.perf_counter() - t0) * 1000)
     return GenAIResponse(request_id=x_request_id, duration_ms=dt_ms, output=out or "")

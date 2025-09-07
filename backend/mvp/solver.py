@@ -5,9 +5,21 @@ from __future__ import annotations
 
 from typing import Mapping, Optional
 
-from constants import ANALYSIS_NODE_PROMPT, ANSWER_NODE_PROMPT, EXAMPLES_NODE_PROMPT
-from bb_types import PlannerLLM, SolverResult
-from utils import LOG
+
+try:
+    from .constants import (
+        ANALYSIS_NODE_PROMPT,
+        ANSWER_NODE_PROMPT,
+        EXAMPLES_NODE_PROMPT,
+    )
+    from .bb_types import PlannerLLM, SolverResult
+except ImportError:
+    from constants import (
+        ANALYSIS_NODE_PROMPT,
+        ANSWER_NODE_PROMPT,
+        EXAMPLES_NODE_PROMPT,
+    )
+    from bb_types import PlannerLLM, SolverResult
 
 
 class EchoSolver:
