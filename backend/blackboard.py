@@ -36,7 +36,7 @@ from typing import (
     runtime_checkable,
 )
 
-from constants import (
+from .constants import (
     PLANNER_PROMPT,
     CQAP_SECTION_PROMPT,
     TEMPLATE_REGISTRY,
@@ -74,9 +74,17 @@ from constants import (
     REFLECT_REREP_PROMPT,
     CONSISTENCY_SELECT_PROMPT,
     HEDGE_UNCERTAINTY_PROMPT,
+    CLASSIFY_QUERY_PROMPT,
+    CLASSIFY_QUERY_SCHEMA_HINT,
+    JSON_PHASE_SYSTEM_PREFIX,
+    JSON_PHASE_HEADER_SUFFIX,
+    JSON_PHASE_REPAIR_SUFFIX,
+    CQAP_META_PROMPT,
+    MISSION_PLAN_PROMPT,
+    MISSION_PLAN_SCHEMA_HINT,
 )
 
-from kern.src.kern.core import init_logging
+from .kern.src.kern.core import init_logging
 
 # Environment-driven defaults
 _GLOBAL_MAX_CONCURRENT = int(os.getenv("GLOBAL_MAX_CONCURRENT", "16"))
@@ -133,26 +141,10 @@ async def classify_query_llm(query: str, llm: "PlannerLLM", *, timeout: float = 
     """
     if llm is None:
         return classify_query(query)
-    schema_hint = (
-        '{ "type":"object","required":["kind","score"],'
-        '  "properties":{"kind":{"enum":["Atomic","Hybrid","Composite"]},"score":{"type":"number"},"rationale":{"type":"string"},"cues":{"type":"object"}} }'
-    )
-    prompt = (
-        "SYSTEM: CLASSIFY\n"
-        "Return ONLY a single JSON object. No prose.\n"
-        "Schema (informal): " + schema_hint + "\n\n"
-        "Task: Classify the user's query by scope/complexity.\n"
-        "- Atomic = single, narrow deliverable; no multi-phase orchestration; no explicit comparisons.\n"
-        "- Hybrid = two or more deliverables OR a compare/contrast OR explicit dependencies/rollout elements.\n"
-        "- Composite = multi-phase plan (objectives/tactics), or broad strategy spanning analysis+design+validation.\n"
-        "Important: a short sentence can still be deep; do NOT use length as a proxy. Consider ops depth (SLO/SLA, canary/rollback, observability), advanced CS terms,\n"
-        "comparisons (versus/vs), explicit dependencies (after/before/depends), and enumerations (lists/bullets/commas/conjunctions).\n\n"
-        "Output fields:\n"
-        '- kind: "Atomic" | "Hybrid" | "Composite"\n'
-        "- score: a confidence 0..1 for chosen kind\n"
-        "- rationale: one non-fluffy sentence (optional)\n"
-        "- cues: counts {deliverables, comparisons, dependencies, lists, conjunctions, ops_depth, advanced, length}\n\n"
-        "QUERY:\n" + _sanitize_text(query)
+    prompt = _fmt(
+        CLASSIFY_QUERY_PROMPT,
+        schema_hint=CLASSIFY_QUERY_SCHEMA_HINT,
+        query=_sanitize_text(query),
     )
     try:
         raw = await llm.complete(prompt, temperature=0.0, timeout=timeout)
@@ -841,11 +833,7 @@ async def _llm_json_phase(llm: "PlannerLLM", phase: str, base_prompt: str, *, te
     if llm is None:
         return {}
     import time as _time
-    header = (
-        f"SYSTEM: {phase}\n"
-        "Return ONLY a single JSON object. No prose or markdown.\n"
-        "If unknown, use null or an empty list/string.\n\n"
-    )
+    header = _fmt(JSON_PHASE_SYSTEM_PREFIX, phase=phase) + JSON_PHASE_HEADER_SUFFIX
     prompt = header + base_prompt
     attempts = 0
     while attempts <= max_retries:
@@ -862,7 +850,7 @@ async def _llm_json_phase(llm: "PlannerLLM", phase: str, base_prompt: str, *, te
         data = safe_json_loads(blob, default=None)
         if isinstance(data, dict):
             return data
-        prompt = header + base_prompt + "\n\nREPAIR:\nSend ONLY valid JSON for the object. No commentary."
+        prompt = header + base_prompt + JSON_PHASE_REPAIR_SUFFIX
     return {}
 
 def _cqap_meta_prompt(query: str, protocol: Mapping[str, Any]) -> str:
@@ -872,13 +860,7 @@ def _cqap_meta_prompt(query: str, protocol: Mapping[str, Any]) -> str:
     """
     proto_json = json.dumps(protocol, ensure_ascii=False, sort_keys=True)
     q = _sanitize_text(query)
-    return (
-        "Fill the PROTOCOL keys with concise, decision-ready analysis.\n"
-        "- Keep the same keys as PROTOCOL; for nested hints (e.g., PrecisionLevel), return an object.\n"
-        "- Be terse but specific; a short sentence can be deep.\n"
-        f"TARGET: {q}\n"
-        f"PROTOCOL: {proto_json}\n"
-    )
+    return _fmt(CQAP_META_PROMPT, target=q, protocol=proto_json)
 
 def _mission_plan_prompt(query: str, meta: Mapping[str, Any]) -> str:
     """
@@ -888,28 +870,12 @@ def _mission_plan_prompt(query: str, meta: Mapping[str, Any]) -> str:
     """
     q = _sanitize_text(query)
     meta_json = json.dumps(meta, ensure_ascii=False, sort_keys=True)
-    schema_hint = {
-        "Strategy": [
-            {
-                "O1": "Objective text",
-                "queries": {"Q1": "question...", "Q2": "question..."},
-                "tactics": [
-                    {
-                        "t1": "tactic description",
-                        "dependencies": ["expected_artifact_or_tactic_name"],
-                        "expected_artifact": "file_or_doc_name",
-                    }
-                ],
-            }
-        ]
-    }
-    return (
-        "Produce ONLY JSON for a mission plan that can compile into a DAG.\n"
-        "Rules:\n"
-        "- Use keys O1..On (or 'Objective' if needed).\n"
-        "- Each tactic: a 'tX' key, 'dependencies' (names or artifacts), and 'expected_artifact'.\n"
-        "- Prefer explicit dependencies if comparisons/rollouts are implied.\n"
-        f"TARGET: {q}\nMETA: {meta_json}\nSCHEMA_HINT: {json.dumps(schema_hint, ensure_ascii=False)}\n"
+    schema_hint_json = json.dumps(MISSION_PLAN_SCHEMA_HINT, ensure_ascii=False)
+    return _fmt(
+        MISSION_PLAN_PROMPT,
+        target=q,
+        meta=meta_json,
+        schema_hint=schema_hint_json,
     )
 
 # === CQAP → Plan compiler (normalized, cohesive) ===
