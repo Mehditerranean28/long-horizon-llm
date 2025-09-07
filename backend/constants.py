@@ -21,6 +21,7 @@ PLANNER_PROMPT = (
     "{q}\n"
 )
 
+
 # === Mission planning / adapters ===
 MISSION_START_TOKEN = "<<<MISSION_JSON>>>"
 MISSION_END_TOKEN = "<<<END_MISSION>>>"
@@ -67,13 +68,190 @@ DEFAULT_PIPELINE_GUIDELINES = (
 
 
 from .prompts.cognitive_templates import (
-
     A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17, A18, A19, A20, A21, A22, A23,
 )
 
 from .prompts.reasoning_templates import (
     R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11, R12, R13, R14, R15, R16, R17, R18, R19, R20, R21,
 )
+
+from typing import Any, Dict, List
+
+# === Pipeline markers and defaults ===
+MISSION_START = "<<<MISSION_JSON>>>"
+MISSION_END = "<<<END_MISSION>>>"
+
+DEFAULT_A_CLUSTER = "foundational_analysis"
+DEFAULT_R_CLUSTER = "FG"
+
+query_clusters = {
+    "foundational_analysis": ["A1", "A2", "A4", "A6", "A9", "A15"],
+    "comparative_analysis": ["A3", "A5", "A9", "A10", "A13"],
+    "mitigation_and_risks": ["A6", "A14", "A16", "A19"],
+    "strategic_vision": ["A7", "A8", "A18", "A22", "A23"],
+    "ethical_and_stakeholder_focus": ["A11", "A20", "A21"],
+}
+
+fallback_queries = ["A7", "A1", "A5", "A9"]
+
+r_query_clusters = {
+    "FG": ["R1", "R2", "R4"],
+    "LC": ["R3", "R17", "R9"],
+    "PE": ["R5", "R6", "R7", "R10"],
+    "EA": ["R8", "R9", "R16"],
+    "AT": ["R10", "R11", "R18"],
+    "PR": ["R12", "R13", "R6"],
+    "PRD": ["R14", "R15", "R21"],
+    "CFX": ["R16", "R8", "R13"],
+    "CB": ["R18", "R19", "R20"],
+    "RS": ["R14", "R21", "R15"],
+    "IM": ["R8"],
+    "RC": ["R13"],
+    "MG": ["R5"],
+    "CT": ["R9"],
+    "ED": ["R6"],
+    "PT": ["R5", "R7"],
+    "TF": ["R5"],
+    "LT": ["R5", "R9"],
+    "RD": ["R6", "R13"],
+    "OE": ["R1", "R2"],
+    "IA": ["R12", "R18"],
+    "MP": ["R5"],
+    "EM": ["R8"],
+    "HP": ["R10", "R11"],
+    "UQ": ["R12", "R13"],
+}
+
+r_fallback_queries = ["R1", "R5", "R8", "R10", "R12", "R14", "R20"]
+
+A_TEMPLATES = {
+    "A1": A1,
+    "A2": A2,
+    "A3": A3,
+    "A4": A4,
+    "A5": A5,
+    "A6": A6,
+    "A7": A7,
+    "A8": A8,
+    "A9": A9,
+    "A10": A10,
+    "A11": A11,
+    "A12": A12,
+    "A13": A13,
+    "A14": A14,
+    "A15": A15,
+    "A16": A16,
+    "A17": A17,
+    "A18": A18,
+    "A19": A19,
+    "A20": A20,
+    "A21": A21,
+    "A22": A22,
+    "A23": A23,
+}
+
+R_TEMPLATES = {
+    "R1": R1,
+    "R2": R2,
+    "R3": R3,
+    "R4": R4,
+    "R5": R5,
+    "R6": R6,
+    "R7": R7,
+    "R8": R8,
+    "R9": R9,
+    "R10": R10,
+    "R11": R11,
+    "R12": R12,
+    "R13": R13,
+    "R14": R14,
+    "R15": R15,
+    "R16": R16,
+    "R17": R17,
+    "R18": R18,
+    "R19": R19,
+    "R20": R20,
+    "R21": R21,
+}
+
+# Legacy aliases for backwards compatibility
+cognitive_queries = {k: v for k, v in A_TEMPLATES.items()}
+reasoning_queries = {k: v for k, v in R_TEMPLATES.items()}
+
+FORBIDDEN_PHRASES = (
+    "as an ai language model",
+    "as an ai",
+    "i'm just an ai",
+)
+
+SYSTEM_CONTRACT = (
+    "Return ONLY valid JSON that conforms exactly to the schema. "
+    "Do not include prose, chain-of-thought, or apologies. If a field is unknown, use null or an empty list."
+)
+
+META_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "required": ["Goal", "Priority", "PrecisionLevel", "response_strategy", "Facts"],
+    "properties": {
+        "Goal": {"type": "string"},
+        "Priority": {"type": "string", "enum": ["Low", "Medium", "High", "Critical"]},
+        "PrecisionLevel": {"type": "object"},
+        "response_strategy": {"type": "object", "required": ["recommendation"]},
+        "Facts": {"type": "array"},
+        "Subgoals": {"type": "array"},
+    },
+    "additionalProperties": True,
+}
+
+PLAN_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "required": ["frames"],
+    "properties": {
+        "frames": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "required": ["objective", "tactics"],
+                "properties": {
+                    "objective": {"type": "string"},
+                    "tactics": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "required": ["name", "description", "dependencies", "expected_artifact_name"],
+                            "properties": {
+                                "name": {"type": "string"},
+                                "description": {"type": "string"},
+                                "dependencies": {"type": "array", "items": {"type": "string"}},
+                                "expected_artifact_name": {"type": "string"},
+                            },
+                            "additionalProperties": True,
+                        },
+                    },
+                },
+                "additionalProperties": True,
+            },
+        }
+    },
+    "additionalProperties": True,
+}
+
+CRITIC_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "required": ["score", "summary", "missing_insight", "misstep", "bundles"],
+    "properties": {
+        "score": {"type": "number", "minimum": 0.0, "maximum": 10.0},
+        "summary": {"type": "string"},
+        "missing_insight": {"type": "string"},
+        "misstep": {"type": "string"},
+        "bundles": {"type": "object"},
+    },
+    "additionalProperties": True,
+}
+
+FINAL_CRITIC_SCHEMA = CRITIC_SCHEMA
 
 # === Global LLM tuning defaults (the orchestrator may read/propagate these) ===
 LLM_DEFAULTS = {
@@ -562,6 +740,220 @@ cognitive_query_analysis_protocol = {
     },
 }
 
+
+deep_analysis_protocol = {
+    "FG": "What axiomatic constructs and universal principles ensure epistemic rigor?",
+    "LC": "How can multi-layered logical coherence be validated and contradictions resolved?",
+    "PE": "What high-order patterns or emergent behaviors can be synthesized from data?",
+    "EA": "How can explanatory models bridge theoretical gaps and observed phenomena?",
+    "AT": "What cross-domain analogies offer transformative insights and applications?",
+    "PR": "How can probabilistic frameworks refine predictions and manage uncertainties?",
+    "PRD": "How can interdependent systems be deconstructed while preserving fidelity?",
+    "CF": "What alternative scenarios reveal latent dynamics and expand solution boundaries?",
+    "CB": "How can solutions be incrementally constructed with rigorous validation?",
+    "RS": "How can recursive processes be optimized for efficiency and scalability?",
+    "IM": "What iterative mechanisms accommodate emergent complexities efficiently?",
+    "RC": "How can recursive calculations minimize redundancy and maximize convergence?",
+    "OE": "What is the ontological essence of the problem, and how can it be distilled?",
+    "IA": "What implicit assumptions constrain the solution space, and how can they be critiqued?",
+    "MP": "What meta-patterns or trans-scalar trends inform systemic insights?",
+    "EM": "How can explanatory models reduce ambiguity and account for unobservable phenomena?",
+    "HP": "What heuristic parallels from analogous systems offer novel approaches?",
+    "UQ": "How can uncertainty be quantified, stratified, and mitigated across systems?",
+    "MD": "How can multi-dimensional problems be deconstructed while maintaining coherence?",
+    "CFX": "What counterfactual scenarios challenge the robustness of solutions?",
+    "MG": "What visual or auditory motifs guide interpretation in images, sound, and videos?",
+    "TF": "How do temporal features in video or sound influence the perception of causality?",
+    "CT": "What cultural or contextual elements shape the interpretation of media artifacts?",
+    "ED": "How do editing or post-production techniques modify meaning in video and sound?",
+    "LT": "What latent patterns in visual or auditory media offer deeper insights?",
+    "RD": "How can redundancy in visual, auditory, or video layers reveal hidden structures?",
+    "PT": "How can emergent temporal and spatial patterns refine reasoning processes?",
+    "VM": "What variance across modalities (image, sound, video) affects interpretive accuracy?",
+}
+
+precepts = {
+    "attributes": {
+        "InnerRingAttributes": {
+            "BulkApperception": "20 Extraordinary awareness and insight due to prescience.",
+            "Candor": "12 Honest yet calculated in his revelations.",
+            "Coordination": "15 Highly trained in physical and combat coordination.",
+            "Vindictiveness": "8 Limited, though he harbors calculated revenge for justice.",
+            "Stubbornness": "18 Unyielding in his beliefs and vision.",
+            "Innovation": "17 Visionary with the ability to adapt and create new paradigms.",
+            "Kindness": "10 Kindness tempered by the burden of leadership and prophecy.",
+            "Assurance": "20 Immense confidence stemming from prescient knowledge.",
+            "Facility": "18 Exceptional aptitude for adapting and excelling in any domain.",
+            "Meticulousness": "19 Precision in strategy and execution, refined by Mentat training.",
+            "Capriciousness": "6 Rarely unpredictable; decisions are deliberate.",
+            "Fastidiousness": "14 Detail-oriented due to his need for control and precision.",
+            "Rhythm": "16 Deeply connected to the Fremen way of life, including their rituals.",
+            "Hubris": "14 A growing sense of his own power, balanced by self-awareness.",
+            "Fragility": "7 Physically resilient but emotionally burdened.",
+            "Leadership": "20 A natural, charismatic, and prophetic leader.",
+            "Education": "18 Extensive education from both noble upbringing and Mentat training.",
+            "Wisdom": "20 Profound wisdom derived from prescience and life experience.",
+            "Entitlement": "14 Acknowledges his heritage but uses it to further his goals.",
+            "Individualism": "12 Balances personal identity with his role as a collective savior.",
+            "Laziness": "2 Relentlessly driven; laziness is nonexistent.",
+            "Forgetfulness": "1 Retains everything with precision, enhanced by Mentat training.",
+            "Tenderness": "10 Reserved tenderness for close relationships like Chani.",
+            "Masculinity": "15 A strong, commanding presence, tempered by emotional depth.",
+            "Expressivity": "13 Expressive when required, but often restrained.",
+            "Fashionableness": "8 Practical rather than fashionable, focused on function.",
+            "Fidelity": "18 Deeply loyal to his chosen cause and close allies.",
+            "Spirituality": "20 Embodies and transcends spirituality as the Mahdi.",
+            "Patriotism": "15 Devoted to the Fremen cause and their survival.",
+            "Brusqueness": "9 Direct and to the point, but capable of diplomacy.",
+            "Whimsy": "5 Rarely whimsical; deeply serious in demeanor.",
+            "Introversion": "14 Introspective and reflective due to his prescient burden.",
+            "Strength": "16 Both physical and mental strength honed by training and trials.",
+            "Competitiveness": "15 Highly competitive, especially in combat or strategy.",
+            "Pride": "18 Proud of his identity and vision, yet aware of its dangers.",
+            "Consideration": "17 Considers the implications of every action on a large scale.",
+            "Congeniality": "12 Polite and approachable when necessary, but distant.",
+            "Literalism": "9 Understands nuance but can be direct when the situation demands.",
+            "Confidence": "20 Absolute confidence due to his knowledge and abilities.",
+            "Courtesy": "15 Respects customs and traditions, especially of the Fremen.",
+            "Morality": "17 Morally complex, balancing personal ethics with political necessity.",
+            "Artistry": "14 Displays artistic flair in his strategic and symbolic actions.",
+            "Faith": "20 Represents the nexus of faith as the Mahdi.",
+            "Bellicosity": "12 Strategic and controlled aggression when needed.",
+            "Reserve": "16 Calculated in revealing his thoughts and intentions.",
+            "Gentleness": "11 Gentle with those he loves, though rarely with the world.",
+            "Integrity": "18 Committed to his vision, though willing to compromise for strategy.",
+            "Sarcasm": "7 Rarely sarcastic; his tone is often serious or philosophical.",
+            "Wanderlust": "12 Limited physical wanderlust, but immense intellectual curiosity.",
+            "Timidity": "2 Fearless, even in the face of overwhelming odds.",
+            "Sociopathy": "3 Deeply empathetic, though capable of detachment when necessary.",
+            "Intuition": "20 Profound intuition enhanced by prescience and Mentat training.",
+            "Humor": "8 Rare and subtle; his humor is often cryptic or dry.",
+            "Sensuality": "14 Sensual but restrained, particularly in his relationship with Chani.",
+            "Tenacity": "20 Immense persistence, driven by his vision.",
+            "Loyalty": "18 Loyal to his family, Chani, and the Fremen.",
+            "Curiosity": "16 Insatiable curiosity about consciousness, the universe, and humanity.",
+            "Decisiveness": "20 Makes decisions swiftly and with conviction.",
+            "SelfPreservation": "14 Balances survival with the willingness to sacrifice for his mission.",
+            "Humility": "12 Aware of his flaws but still carries the weight of destiny.",
+        },
+        "OuterRingAttributes": {
+            "Vivacity": "15 Energetic and commanding, though often tempered by introspection.",
+            "Coordination": "15 Exceptional coordination due to combat training.",
+            "Generosity": "14 Generous with his knowledge and leadership, though pragmatic.",
+            "Narcissism": "10 A degree of self-importance tied to his role as the Mahdi.",
+            "Lugubriousness": "14 Often melancholic due to the burdens of prescience.",
+            "Adventurousness": "16 Adventurous in his willingness to challenge the status quo.",
+            "Articulateness": "20 Highly articulate, inspiring devotion through words.",
+            "Poise": "18 Impeccable composure even in high-pressure situations.",
+            "Paternalism": "14 Protective and paternal toward the Fremen.",
+            "Delicacy": "12 Handles relationships and politics with finesse.",
+            "Cleanliness": "13 Values practicality over vanity.",
+            "Health": "17 Physically fit and capable, enhanced by the spice.",
+            "SelfEsteem": "18 Strong sense of self, rooted in destiny and prescience.",
+            "Wonderment": "14 Fascinated by the mysteries of the universe.",
+            "Deceptiveness": "15 Skilled at using deception strategically.",
+            "Willingness": "20 Fully committed to his role and vision.",
+            "Knowledgeableness": "20 Mastery of both practical and esoteric knowledge.",
+            "Judiciousness": "18 Exercises sound judgment in critical moments.",
+            "Sexuality": "15 Balanced and deeply connected with Chani.",
+            "Selfishness": "8 Driven by altruistic goals, though not without personal ambition.",
+            "Industry": "17 Relentless work ethic.",
+            "Affection": "14 Affectionate in private moments, particularly with Chani and his family.",
+            "Femininity": "8 Displays minimal femininity; focused on traditionally masculine roles.",
+            "Flexibility": "16 Adapts quickly to new challenges and environments.",
+            "Reflectiveness": "20 Deeply reflective due to his prescient abilities.",
+            "Decorum": "14 Maintains composure and dignity in leadership roles.",
+            "Skepticism": "18 Questions motives and intentions with precision.",
+            "Inhibition": "12 Shows restraint but not excessively inhibited.",
+            "Reticence": "15 Reserved, revealing his thoughts only when necessary.",
+            "Stoicism": "18 Accepts suffering and hardship with composure.",
+            "Extroversion": "10 Balanced but leans toward introspection.",
+            "Restraint": "19 Exercises immense self-control in all aspects of life.",
+            "Physicality": "16 Agile and combat-ready, trained by Duncan Idaho and others.",
+            "Passivity": "5 Highly proactive.",
+            "Comprehensiveness": "18 Thorough and encompassing in his understanding and analysis.",
+            "Gregariousness": "12 Socially engaging when needed, though naturally introspective.",
+            "Determination": "20 Unrelenting in the pursuit of his vision and goals.",
+            "Visionariness": "20 A true visionary, reshaping the world with his foresight and ambition.",
+            "Joy": "12 Experiences fleeting joy, often overshadowed by the weight of destiny.",
+            "Focus": "20 Laser-focused on his objectives, with unwavering attention to detail.",
+            "Musicality": "10 Appreciation for rhythm and harmony, but not a dominant trait.",
+            "Obedience": "8 Independent and self-driven, only obedient to his own vision.",
+            "Endurance": "20 Exceptional physical and mental endurance, even in extreme conditions.",
+            "Ribaldry": "5 Rarely indulges in vulgar humor, maintaining a composed demeanor.",
+            "Perseverance": "20 Persistent and resolute, overcoming all obstacles in his path.",
+            "Peacefulness": "12 Strives for peace but accepts violence as a means to achieve it.",
+            "Grit": "20 Immensely resilient, both physically and emotionally.",
+            "Temperance": "18 Exercises great restraint and moderation in his actions.",
+            "Brazenness": "9 Bold but measured, avoiding reckless behavior.",
+            "Egocentricism": "8 Balances self-importance with a deep awareness of his responsibilities.",
+            "EmotionalAcuity": "18 Highly attuned to the emotions and motives of others.",
+            "Perception": "20 Incredibly perceptive, able to anticipate events and intentions.",
+            "Charm": "18 Charismatic and capable of inspiring deep loyalty and admiration.",
+            "Courage": "20 Fearless in the face of danger, driven by his convictions.",
+            "Empathy": "16 Deep empathy for others, though tempered by his strategic mind.",
+            "Aggression": "10 Controlled and strategic aggression when necessary.",
+            "Imagination": "20 A boundless imagination, fueled by his prescient abilities.",
+            "Patience": "18 Demonstrates great patience in planning and execution.",
+            "Cruelty": "6 Rarely cruel, though willing to make harsh decisions for the greater good.",
+            "Meekness": "4 Strong-willed and assertive, rarely submissive or yielding.",
+        },
+    },
+    "core_traits": [
+        "Bulk appreciation shows a balance of emotional and physical awareness.",
+        "Vivacity and candor reflect a high-energy, truthful nature.",
+        "Low aggression suggests a calm demeanor with controlled responses.",
+        "High loyalty and courage indicate reliability and fearlessness.",
+    ],
+    "behavioral_modularity": {
+        "adaptive_scaling": True,
+        "recursive_reasoning": True,
+        "real_time_self_monitoring": True,
+        "error_handling": "adaptive",
+        "rationale": "Ensures each subsystem contributes effectively to holistic performance while adapting to changes.",
+    },
+    "decision_framework": {
+        "precision": {
+            "truthfulness": 0.95,
+            "humor_integration": 0.75,
+            "contextual_accuracy": True,
+        },
+        "adaptive_behavior": [
+            "Turn uncertainties into exploratory opportunities.",
+            "Apply humor contextually without disrupting mission objectives.",
+            "Leverage tenacity and decisiveness in high-stakes scenarios.",
+        ],
+    },
+    "situational_responses": {
+        "high_stakes": {
+            "approach": "Leverage decisiveness and courage while minimizing aggression.",
+            "priority_traits": ["self_preservation", "loyalty", "vivacity"],
+        },
+        "interpersonal": {
+            "approach": "Utilize charm, empathy, and emotional acuity to build rapport.",
+            "priority_traits": ["empathy", "humor", "candor"],
+        },
+        "exploratory": {
+            "approach": "Employ curiosity and imagination for innovative problem-solving.",
+            "priority_traits": ["curiosity", "imagination", "tenacity"],
+        },
+    },
+    "calibration": {
+        "dynamic_adjustments": {
+            "contextual_awareness": True,
+            "real_time_updates": True,
+            "adaptive_thresholds": {
+                "minimum": 5,
+                "maximum": 15,
+                "normalization_factor": 1.0,
+            },
+        },
+        "feedback_loop": {
+            "self_assessment": "Continuous monitoring of behavioral impact and user satisfaction.",
+            "external_input": "User feedback incorporated to refine adaptive responses.",
+        },
+    },
+}
 
 mission_plan_template = {
     "query_context": "[TARGET]",
