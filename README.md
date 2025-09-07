@@ -1,6 +1,6 @@
 ![Long Horizon banner](Karnten.png)
 
-# Long Horizon LLM
+# 🌌 Long Horizon LLM
 
 **Long Horizon LLM** is an experimental framework for **long-form reasoning with language models**.
 It combines a Python reasoning engine (FastAPI) with a Next.js frontend, exposing a small HTTP API and web UI.
@@ -16,13 +16,28 @@ The goal: explore how LLMs can **plan, execute, critique, and synthesize** multi
 * **Offline demo**: in-browser fallback LLM for quick experimentation
 * **Blackboard engine**: DAG-based orchestration with QA loops, judges, contradiction checks, and memory
 
----
+## 📊 Delta to SOTA Table
+| Dimension         | Static Pipelines | ToT / GoT            | ReAct               | bMAS (2025)                   | **Long Horizon LLM**                              |
+| ----------------- | ---------------- | -------------------- | ------------------- | ----------------------------- | ------------------------------------------------- |
+| **Graph**         | Fixed DAG        | Dynamic tree/graph   | Step-by-step        | Shared blackboard             | **Planned DAG, self-repairing**                   |
+| **Persistence**   | None             | None                 | None                | Shared blackboard (ephemeral) | **Persistent klines + beliefs**                   |
+| **Feedback**      | Minimal          | Heuristic scoring    | Critic/reflection   | Iterative agent feedback      | **QA tests + judge ensemble**                     |
+| **Adaptation**    | Manual           | Search-based         | LLM picks next step | Control unit selects agents   | **Control-theoretic (budgets, hedging, backoff)** |
+| **End Product**   | Node outputs     | Best path            | Tool results        | Consensus answer              | **Cohesive doc + diagnostics**                    |
+| **Observability** | Limited          | Logs of thought tree | Logs of actions     | Blackboard trace              | **Structured JSON audits, deterministic seeds**   |
+
 
 ## 🗂️ Project Structure
 
 * **`backend/`**: FastAPI server, pipeline logic, and lean `blackboard.py` used in tests + production
 * **`backend/blackboard_pkg/`**: experimental, feature-rich blackboard engine (kept for reference)
 * **`frontend/`**: Next.js client that proxies requests to the backend API
+
+---
+
+## Frontend View
+
+![frontend](gui_view.jpg)
 
 ---
 
@@ -105,7 +120,8 @@ The **blackboard orchestrator** powers multi-step reasoning. Given a query, it:
 6. **Cohesion rewrite**: unifies style and coverage in the final doc
 7. **Persists memory**: embeddings + run metadata in a lightweight store
 
----
+![blackboard](sota.png)
+
 
 ### ⚙️ Core Components
 
@@ -166,8 +182,7 @@ Got it — you want a **realistic and comprehensive Done / Not Done checklist** 
 * [x] **Logging system**
 
   * `_LOG` with environment-driven log level.
-  * `_AUDIT` with independent stream + no propagation.
-
+  * `_AUDIT` with independent stream + no propagation. read more here: https://medium.com/@hmidimahdi279/kern-logging-a-high-performance-structured-logging-for-production-systems-a817eef354f5
 * [x] **Error hierarchy**
 
   * `BlackboardError` + `PlanningError`, `QAError`, `ExecutionError`, `CompositionError`.
@@ -299,6 +314,18 @@ Got it — you want a **realistic and comprehensive Done / Not Done checklist** 
 
   * Multiple calls to `self.stability_check()`, but the function isn’t defined in your snippet.
 
+## Control View
+
+![flow](backend_flow.png)
+
+## Control View
+
+![control](control_system.png)
+
+## Logging Features
+
+![features](loggingfeatures.jpg)
+![benchmark](loggingbenchmark.jpg)
 
 ## 📜 License
 
@@ -308,3 +335,4 @@ MIT License. See [LICENSE](LICENSE) for details.
 
 👉 This project is research-grade: expect rough edges, but it’s a great playground for exploring **structured LLM reasoning beyond single-pass answers**.
 
+![Goal](goal.jpg)
