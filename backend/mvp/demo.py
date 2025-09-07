@@ -9,10 +9,18 @@ import json
 import os
 from pathlib import Path
 
-from config import OrchestratorConfig
-from execution import Orchestrator
-from memory import MemoryStore
-from solver import build_default_solver_and_planner
+try:
+    from .constants import DEFAULT_DEMO_QUERY
+    from .config import OrchestratorConfig
+    from .execution import Orchestrator
+    from .memory import MemoryStore
+    from .solver import build_default_solver_and_planner
+except ImportError:  # pragma: no cover - fallback for script usage
+    from constants import DEFAULT_DEMO_QUERY  # type: ignore
+    from config import OrchestratorConfig  # type: ignore
+    from execution import Orchestrator  # type: ignore
+    from memory import MemoryStore  # type: ignore
+    from solver import build_default_solver_and_planner  # type: ignore
 
 
 async def main_async() -> None:
@@ -25,10 +33,7 @@ async def main_async() -> None:
     p.add_argument("--mock", action="store_true", help="Force mock planner/solver")
     args = p.parse_args()
 
-    query = " ".join(args.query).strip() or (
-        "Design a secure CRUD API. Provide architecture, data model, and risks. "
-        "Compare 2 frameworks and give a migration plan."
-    )
+    query = " ".join(args.query).strip() or DEFAULT_DEMO_QUERY
 
     solver = planner = None
     if not args.mock:

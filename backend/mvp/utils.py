@@ -19,12 +19,20 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     np = None  # type: ignore
 
-from config import (
-    GLOBAL_BURST_WINDOW_SEC,
-    GLOBAL_MAX_CONCURRENT,
-    GLOBAL_QPS,
-    KLINE_EMBED_DIM,
-)
+try:
+    from .config import (
+        GLOBAL_BURST_WINDOW_SEC,
+        GLOBAL_MAX_CONCURRENT,
+        GLOBAL_QPS,
+        KLINE_EMBED_DIM,
+    )
+except ImportError:  # pragma: no cover - fallback for script usage
+    from config import (
+        GLOBAL_BURST_WINDOW_SEC,
+        GLOBAL_MAX_CONCURRENT,
+        GLOBAL_QPS,
+        KLINE_EMBED_DIM,
+    )  # type: ignore
 
 # ------------------------------- Logging --------------------------------------
 
@@ -169,7 +177,10 @@ def dequantize(q: List[int]) -> List[float]:
 
 # ------------------------------ QA / Patching --------------------------------
 
-from bb_types import Contract, Issue, Patch, QAResult, TestSpec  # circular-safe
+try:
+    from .bb_types import Contract, Issue, Patch, QAResult, TestSpec  # circular-safe
+except ImportError:  # pragma: no cover - fallback for script usage
+    from bb_types import Contract, Issue, Patch, QAResult, TestSpec  # type: ignore
 
 
 def run_tests(content: str, contract: Contract) -> QAResult:

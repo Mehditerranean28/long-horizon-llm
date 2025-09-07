@@ -11,47 +11,90 @@ import uuid
 from dataclasses import asdict
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from config import (
-    FORECAST_ALPHA,
-    FORECAST_BUFFER,
-    FORECAST_DEFAULT_TOKENS,
-    OrchestratorConfig,
-)
-from constants import (
-    CLAIMS_EXTRACT_PROMPT,
-    COHESION_APPLY_PROMPT,
-    COHESION_PROMPT,
-    DENSE_FINAL_ANSWER_PROMPT,
-    NODE_APPLY_PROMPT,
-    NODE_RECOMMEND_PROMPT,
-)
-from judges import JUDGES
-from memory import MemoryStore
-from planning import classify_query_llm, make_plan
-from bb_types import (
-    Artifact,
-    BlackBoxSolver,
-    Contract,
-    Critique,
-    Node,
-    Patch,
-    Plan,
-    QAResult,
-)
-from utils import (
-    AUDIT,
-    GLOBAL_LIMITER,
-    LOG,
-    approx_tokens,
-    apply_patches,
-    clip_chars,
-    dataclass_to_json,
-    first_json_object,
-    fmt,
-    run_tests,
-    safe_json_loads,
-    sanitize_text,
-)
+try:
+    from .config import (
+        FORECAST_ALPHA,
+        FORECAST_BUFFER,
+        FORECAST_DEFAULT_TOKENS,
+        OrchestratorConfig,
+    )
+    from .constants import (
+        CLAIMS_EXTRACT_PROMPT,
+        COHESION_APPLY_PROMPT,
+        COHESION_PROMPT,
+        DENSE_FINAL_ANSWER_PROMPT,
+        NODE_APPLY_PROMPT,
+        NODE_RECOMMEND_PROMPT,
+    )
+    from .judges import JUDGES
+    from .memory import MemoryStore
+    from .planning import classify_query_llm, make_plan
+    from .bb_types import (
+        Artifact,
+        BlackBoxSolver,
+        Contract,
+        Critique,
+        Node,
+        Patch,
+        Plan,
+        QAResult,
+    )
+    from .utils import (
+        AUDIT,
+        GLOBAL_LIMITER,
+        LOG,
+        approx_tokens,
+        apply_patches,
+        clip_chars,
+        dataclass_to_json,
+        first_json_object,
+        fmt,
+        run_tests,
+        safe_json_loads,
+        sanitize_text,
+    )
+except ImportError:  # pragma: no cover - fallback for script usage
+    from config import (
+        FORECAST_ALPHA,
+        FORECAST_BUFFER,
+        FORECAST_DEFAULT_TOKENS,
+        OrchestratorConfig,
+    )  # type: ignore
+    from constants import (
+        CLAIMS_EXTRACT_PROMPT,
+        COHESION_APPLY_PROMPT,
+        COHESION_PROMPT,
+        DENSE_FINAL_ANSWER_PROMPT,
+        NODE_APPLY_PROMPT,
+        NODE_RECOMMEND_PROMPT,
+    )  # type: ignore
+    from judges import JUDGES  # type: ignore
+    from memory import MemoryStore  # type: ignore
+    from planning import classify_query_llm, make_plan  # type: ignore
+    from bb_types import (
+        Artifact,
+        BlackBoxSolver,
+        Contract,
+        Critique,
+        Node,
+        Patch,
+        Plan,
+        QAResult,
+    )  # type: ignore
+    from utils import (
+        AUDIT,
+        GLOBAL_LIMITER,
+        LOG,
+        approx_tokens,
+        apply_patches,
+        clip_chars,
+        dataclass_to_json,
+        first_json_object,
+        fmt,
+        run_tests,
+        safe_json_loads,
+        sanitize_text,
+    )  # type: ignore
 
 
 class Orchestrator:

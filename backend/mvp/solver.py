@@ -5,8 +5,20 @@ from __future__ import annotations
 
 from typing import Mapping, Optional
 
-from constants import ANALYSIS_NODE_PROMPT, ANSWER_NODE_PROMPT, EXAMPLES_NODE_PROMPT
-from bb_types import PlannerLLM, SolverResult
+try:
+    from .constants import (
+        ANALYSIS_NODE_PROMPT,
+        ANSWER_NODE_PROMPT,
+        EXAMPLES_NODE_PROMPT,
+    )
+    from .bb_types import PlannerLLM, SolverResult
+except ImportError:  # pragma: no cover - fallback for script usage
+    from constants import (
+        ANALYSIS_NODE_PROMPT,
+        ANSWER_NODE_PROMPT,
+        EXAMPLES_NODE_PROMPT,
+    )  # type: ignore
+    from bb_types import PlannerLLM, SolverResult  # type: ignore
 
 
 class EchoSolver:
