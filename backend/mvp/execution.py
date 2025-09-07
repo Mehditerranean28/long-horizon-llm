@@ -9,7 +9,7 @@ import re
 import time
 import uuid
 from dataclasses import asdict
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 try:
     from .config import (
@@ -35,7 +35,6 @@ try:
         Contract,
         Critique,
         Node,
-        Patch,
         Plan,
         QAResult,
     )
@@ -44,9 +43,7 @@ try:
         GLOBAL_LIMITER,
         LOG,
         approx_tokens,
-        apply_patches,
         clip_chars,
-        dataclass_to_json,
         first_json_object,
         fmt,
         run_tests,
@@ -77,7 +74,6 @@ except ImportError:  # pragma: no cover - fallback for script usage
         Contract,
         Critique,
         Node,
-        Patch,
         Plan,
         QAResult,
     )  # type: ignore
@@ -86,9 +82,7 @@ except ImportError:  # pragma: no cover - fallback for script usage
         GLOBAL_LIMITER,
         LOG,
         approx_tokens,
-        apply_patches,
         clip_chars,
-        dataclass_to_json,
         first_json_object,
         fmt,
         run_tests,
@@ -434,7 +428,6 @@ class Orchestrator:
                 if a:
                     await self._extract_and_store_claims(node=n, content=a.content)
 
-            beliefs_scope = self.memory.beliefs_for_sig(sig)
             bconf = self.memory.detect_belief_conflicts(scope_sig=sig)
             resolution = ""
             if bconf:

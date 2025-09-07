@@ -92,7 +92,6 @@ class LLMJudge:
         prompt = LLM_JUDGE_PROMPT.format(text=text, contract=str(asdict(contract)))
         try:
             res = await self.solver.solve(prompt, {"mode": "judge"})
-            import json
             from .utils import first_json_object, safe_json_loads
 
             data = safe_json_loads(first_json_object(res.text) or "{}") or {}
