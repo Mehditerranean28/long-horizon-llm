@@ -21,13 +21,187 @@ PLANNER_PROMPT = (
     "{q}\n"
 )
 
-from prompts.cognitive_templates import (
+from .prompts.cognitive_templates import (
     A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17, A18, A19, A20, A21, A22, A23,
 )
 
-from prompts.reasoning_templates import (
+from .prompts.reasoning_templates import (
     R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11, R12, R13, R14, R15, R16, R17, R18, R19, R20, R21,
 )
+
+from typing import Any, Dict, List
+
+# === Pipeline markers and defaults ===
+MISSION_START = "<<<MISSION_JSON>>>"
+MISSION_END = "<<<END_MISSION>>>"
+
+DEFAULT_A_CLUSTER = "foundational_analysis"
+DEFAULT_R_CLUSTER = "FG"
+
+query_clusters = {
+    "foundational_analysis": ["A1", "A2", "A4", "A6", "A9", "A15"],
+    "comparative_analysis": ["A3", "A5", "A9", "A10", "A13"],
+    "mitigation_and_risks": ["A6", "A14", "A16", "A19"],
+    "strategic_vision": ["A7", "A8", "A18", "A22", "A23"],
+    "ethical_and_stakeholder_focus": ["A11", "A20", "A21"],
+}
+
+fallback_queries = ["A7", "A1", "A5", "A9"]
+
+r_query_clusters = {
+    "FG": ["R1", "R2", "R4"],
+    "LC": ["R3", "R17", "R9"],
+    "PE": ["R5", "R6", "R7", "R10"],
+    "EA": ["R8", "R9", "R16"],
+    "AT": ["R10", "R11", "R18"],
+    "PR": ["R12", "R13", "R6"],
+    "PRD": ["R14", "R15", "R21"],
+    "CFX": ["R16", "R8", "R13"],
+    "CB": ["R18", "R19", "R20"],
+    "RS": ["R14", "R21", "R15"],
+    "IM": ["R8"],
+    "RC": ["R13"],
+    "MG": ["R5"],
+    "CT": ["R9"],
+    "ED": ["R6"],
+    "PT": ["R5", "R7"],
+    "TF": ["R5"],
+    "LT": ["R5", "R9"],
+    "RD": ["R6", "R13"],
+    "OE": ["R1", "R2"],
+    "IA": ["R12", "R18"],
+    "MP": ["R5"],
+    "EM": ["R8"],
+    "HP": ["R10", "R11"],
+    "UQ": ["R12", "R13"],
+}
+
+r_fallback_queries = ["R1", "R5", "R8", "R10", "R12", "R14", "R20"]
+
+A_TEMPLATES = {
+    "A1": A1,
+    "A2": A2,
+    "A3": A3,
+    "A4": A4,
+    "A5": A5,
+    "A6": A6,
+    "A7": A7,
+    "A8": A8,
+    "A9": A9,
+    "A10": A10,
+    "A11": A11,
+    "A12": A12,
+    "A13": A13,
+    "A14": A14,
+    "A15": A15,
+    "A16": A16,
+    "A17": A17,
+    "A18": A18,
+    "A19": A19,
+    "A20": A20,
+    "A21": A21,
+    "A22": A22,
+    "A23": A23,
+}
+
+R_TEMPLATES = {
+    "R1": R1,
+    "R2": R2,
+    "R3": R3,
+    "R4": R4,
+    "R5": R5,
+    "R6": R6,
+    "R7": R7,
+    "R8": R8,
+    "R9": R9,
+    "R10": R10,
+    "R11": R11,
+    "R12": R12,
+    "R13": R13,
+    "R14": R14,
+    "R15": R15,
+    "R16": R16,
+    "R17": R17,
+    "R18": R18,
+    "R19": R19,
+    "R20": R20,
+    "R21": R21,
+}
+
+FORBIDDEN_PHRASES = (
+    "as an ai language model",
+    "as an ai",
+    "i'm just an ai",
+)
+
+SYSTEM_CONTRACT = (
+    "Return ONLY valid JSON that conforms exactly to the schema. "
+    "Do not include prose, chain-of-thought, or apologies. If a field is unknown, use null or an empty list."
+)
+
+META_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "required": ["Goal", "Priority", "PrecisionLevel", "response_strategy", "Facts"],
+    "properties": {
+        "Goal": {"type": "string"},
+        "Priority": {"type": "string", "enum": ["Low", "Medium", "High", "Critical"]},
+        "PrecisionLevel": {"type": "object"},
+        "response_strategy": {"type": "object", "required": ["recommendation"]},
+        "Facts": {"type": "array"},
+        "Subgoals": {"type": "array"},
+    },
+    "additionalProperties": True,
+}
+
+PLAN_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "required": ["frames"],
+    "properties": {
+        "frames": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "required": ["objective", "tactics"],
+                "properties": {
+                    "objective": {"type": "string"},
+                    "tactics": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "required": ["name", "description", "dependencies", "expected_artifact_name"],
+                            "properties": {
+                                "name": {"type": "string"},
+                                "description": {"type": "string"},
+                                "dependencies": {"type": "array", "items": {"type": "string"}},
+                                "expected_artifact_name": {"type": "string"},
+                            },
+                            "additionalProperties": True,
+                        },
+                    },
+                },
+                "additionalProperties": True,
+            },
+        }
+    },
+    "additionalProperties": True,
+}
+
+CRITIC_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "required": ["score", "summary", "missing_insight", "misstep", "bundles"],
+    "properties": {
+        "score": {"type": "number", "minimum": 0.0, "maximum": 10.0},
+        "summary": {"type": "string"},
+        "missing_insight": {"type": "string"},
+        "misstep": {"type": "string"},
+        "bundles": {"type": "object"},
+    },
+    "additionalProperties": True,
+}
+
+FINAL_CRITIC_SCHEMA = CRITIC_SCHEMA
 
 # === Global LLM tuning defaults (the orchestrator may read/propagate these) ===
 LLM_DEFAULTS = {
@@ -447,6 +621,52 @@ cognitive_query_analysis_protocol = {
     },
 }
 
+
+deep_analysis_protocol = {
+    "FG": "What axiomatic constructs and universal principles ensure epistemic rigor?",
+    "LC": "How can multi-layered logical coherence be validated and contradictions resolved?",
+    "PE": "What high-order patterns or emergent behaviors can be synthesized from data?",
+    "EA": "How can explanatory models bridge theoretical gaps and observed phenomena?",
+    "AT": "What cross-domain analogies offer transformative insights and applications?",
+    "PR": "How can probabilistic frameworks refine predictions and manage uncertainties?",
+    "PRD": "How can interdependent systems be deconstructed while preserving fidelity?",
+    "CF": "What alternative scenarios reveal latent dynamics and expand solution boundaries?",
+    "CB": "How can solutions be incrementally constructed with rigorous validation?",
+    "RS": "How can recursive processes be optimized for efficiency and scalability?",
+    "IM": "What iterative mechanisms accommodate emergent complexities efficiently?",
+    "RC": "How can recursive calculations minimize redundancy and maximize convergence?",
+    "OE": "What is the ontological essence of the problem, and how can it be distilled?",
+    "IA": "What implicit assumptions constrain the solution space, and how can they be critiqued?",
+    "MP": "What meta-patterns or trans-scalar trends inform systemic insights?",
+    "EM": "How can explanatory models reduce ambiguity and account for unobservable phenomena?",
+    "HP": "What heuristic parallels from analogous systems offer novel approaches?",
+    "UQ": "How can uncertainty be quantified, stratified, and mitigated across systems?",
+    "MD": "How can multi-dimensional problems be deconstructed while maintaining coherence?",
+    "CFX": "What counterfactual scenarios challenge the robustness of solutions?",
+    "MG": "What visual or auditory motifs guide interpretation in images, sound, and videos?",
+    "TF": "How do temporal features in video or sound influence the perception of causality?",
+    "CT": "What cultural or contextual elements shape the interpretation of media artifacts?",
+    "ED": "How do editing or post-production techniques modify meaning in video and sound?",
+    "LT": "What latent patterns in visual or auditory media offer deeper insights?",
+    "RD": "How can redundancy in visual, auditory, or video layers reveal hidden structures?",
+    "PT": "How can emergent temporal and spatial patterns refine reasoning processes?",
+    "VM": "What variance across modalities (image, sound, video) affects interpretive accuracy?",
+}
+
+precepts = {
+    "decision_framework": {
+        "precision": {
+            "truthfulness": 0.95,
+            "humor_integration": 0.75,
+            "contextual_accuracy": True,
+        },
+        "adaptive_behavior": [
+            "Turn uncertainties into exploratory opportunities.",
+            "Apply humor contextually without disrupting mission objectives.",
+            "Leverage tenacity and decisiveness in high-stakes scenarios.",
+        ],
+    },
+}
 
 mission_plan_template = {
     "query_context": "[TARGET]",
