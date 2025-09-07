@@ -12,14 +12,14 @@ try:
         ANSWER_NODE_PROMPT,
         EXAMPLES_NODE_PROMPT,
     )
-    from .bb_types import PlannerLLM, SolverResult
+    from .bb_types import SolverResult
 except ImportError:
     from constants import (
         ANALYSIS_NODE_PROMPT,
         ANSWER_NODE_PROMPT,
         EXAMPLES_NODE_PROMPT,
     )
-    from bb_types import PlannerLLM, SolverResult
+    from bb_types import SolverResult
 
 
 class EchoSolver:

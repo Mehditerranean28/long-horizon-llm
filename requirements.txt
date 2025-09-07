@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+pydantic
+numpy
+jsonschema
+openai
+pytest
+ruff

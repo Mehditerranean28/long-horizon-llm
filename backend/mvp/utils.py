@@ -12,7 +12,7 @@ import re
 import statistics
 from collections import deque
 from dataclasses import asdict
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 try:
     import numpy as np
@@ -170,9 +170,9 @@ def dequantize(q: List[int]) -> List[float]:
 # ------------------------------ QA / Patching --------------------------------
 
 try:
-    from .bb_types import Contract, Issue, Patch, QAResult, TestSpec  # circular-safe
+    from .bb_types import Contract, Issue, Patch, QAResult  # circular-safe
 except ImportError:  # pragma: no cover - fallback for script usage
-    from bb_types import Contract, Issue, Patch, QAResult, TestSpec  # type: ignore
+    from bb_types import Contract, Issue, Patch, QAResult  # type: ignore
 
 
 def run_tests(content: str, contract: Contract) -> QAResult:
