@@ -10,13 +10,13 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-from .config import (
+from config import (
     CLUSTER_LINK_WEIGHT,
     CLUSTER_MIN_SIM,
     KLINE_EMBED_DIM,
     KLINE_MAX_ENTRIES,
 )
-from .utils import AUDIT, cosine, dequantize, hash_embed, quantize
+from utils import AUDIT, cosine, dequantize, hash_embed, quantize
 
 
 class MemoryStore:

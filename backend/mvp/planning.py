@@ -7,9 +7,9 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional
 
-from .constants import PLANNER_PROMPT  # prompt strings live in constants.py
-from .bb_types import Classification, Contract, Node, Plan, TestSpec
-from .utils import fmt, first_json_object, safe_json_loads, slug
+from constants import PLANNER_PROMPT  # prompt strings live in constants.py
+from bb_types import Classification, Contract, Node, Plan, TestSpec
+from utils import fmt, first_json_object, safe_json_loads, slug
 
 # Heuristics for classifier
 _DELIVERABLE = re.compile(r"\b(design|architecture|spec|contract|roadmap|benchmark|compare|trade[- ]?offs?|rfc|plan|protocol|implementation|experiment|evaluate)\b", re.I)

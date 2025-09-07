@@ -9,10 +9,10 @@ import json
 import os
 from pathlib import Path
 
-from .config import OrchestratorConfig
-from .execution import Orchestrator
-from .memory import MemoryStore
-from .solver import build_default_solver_and_planner
+from config import OrchestratorConfig
+from execution import Orchestrator
+from memory import MemoryStore
+from solver import build_default_solver_and_planner
 
 
 async def main_async() -> None:

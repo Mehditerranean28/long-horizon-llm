@@ -19,7 +19,7 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     np = None  # type: ignore
 
-from .config import (
+from config import (
     GLOBAL_BURST_WINDOW_SEC,
     GLOBAL_MAX_CONCURRENT,
     GLOBAL_QPS,
@@ -169,7 +169,7 @@ def dequantize(q: List[int]) -> List[float]:
 
 # ------------------------------ QA / Patching --------------------------------
 
-from .bb_types import Contract, Issue, Patch, QAResult, TestSpec  # circular-safe
+from bb_types import Contract, Issue, Patch, QAResult, TestSpec  # circular-safe
 
 
 def run_tests(content: str, contract: Contract) -> QAResult:

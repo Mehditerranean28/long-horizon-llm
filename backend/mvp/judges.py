@@ -7,8 +7,8 @@ import re
 from dataclasses import asdict
 from typing import Dict, List
 
-from .bb_types import Contract, Critique, Judge
-from .utils import ensure_header
+from bb_types import Contract, Critique, Judge
+from utils import ensure_header
 
 
 class JudgeRegistry:
