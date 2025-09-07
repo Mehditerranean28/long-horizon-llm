@@ -6,21 +6,17 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 from pathlib import Path
 
-try:
-    from .constants import DEFAULT_DEMO_QUERY
-    from .config import OrchestratorConfig
-    from .execution import Orchestrator
-    from .memory import MemoryStore
-    from .solver import build_default_solver_and_planner
-except ImportError:  # pragma: no cover - fallback for script usage
-    from constants import DEFAULT_DEMO_QUERY  # type: ignore
-    from config import OrchestratorConfig  # type: ignore
-    from execution import Orchestrator  # type: ignore
-    from memory import MemoryStore  # type: ignore
-    from solver import build_default_solver_and_planner  # type: ignore
+from backend.kern.src.kern.core import init_logging
+from config import OrchestratorConfig
+from execution import Orchestrator
+from memory import MemoryStore
+from solver import build_default_solver_and_planner
+from utils import LOG
+from constants import DEFAULT_DEMO_QUERY
 
 
 async def main_async() -> None:
@@ -33,46 +29,57 @@ async def main_async() -> None:
     p.add_argument("--mock", action="store_true", help="Force mock planner/solver")
     args = p.parse_args()
 
+    init_logging()
+    LOG.debug("Parsed arguments: %s", args)
+    if args.verbose:
+        LOG.setLevel(logging.DEBUG)
+        LOG.debug("Verbose logging enabled")
+    LOG.info("Using memory file %s", args.mem)
+
     query = " ".join(args.query).strip() or DEFAULT_DEMO_QUERY
 
     solver = planner = None
+    LOG.info("Building solver and planner (mock=%s)", args.mock)
     if not args.mock:
         try:
             from ..adapters import build_pipeline_solver_and_planner  # optional external
             solver, planner = await build_pipeline_solver_and_planner(use_mock_llm=False)
-        except Exception:
-            pass
+            LOG.info("Loaded pipeline solver/planner")
+        except Exception as e:
+            LOG.error("Falling back to mock solver/planner: %s", e)
     if solver is None or planner is None:
         solver, planner = await build_default_solver_and_planner(use_mock_llm=True)
+        LOG.info("Using default mock solver/planner")
 
     memory = MemoryStore(Path(args.mem))
     config = OrchestratorConfig(concurrent=args.concurrent, max_rounds=args.rounds)
 
     orch = Orchestrator(solver=solver, planner_llm=planner, memory=memory, config=config)
 
+    LOG.info("Starting orchestrator run")
     result = await orch.run(query)
+    LOG.info("Orchestrator run completed")
 
-    print("\n===== 📝 FINAL (COHESIVE) =====\n")
-    print(result["final"])
+    LOG.info("===== 📝 FINAL (COHESIVE) =====\n%s", result["final"])
 
-    print("\n===== 🧩 ARTIFACTS =====")
+    LOG.info("===== 🧩 ARTIFACTS =====")
     for k, v in result["artifacts"].items():
-        print(f"\n--- {k} ({v['status']}) ---")
+        LOG.info("--- %s (%s) ---", k, v["status"])
         body = v["content"].strip()
-        print(body[:400] + ("..." if len(body) > 400 else ""))
+        LOG.info("%s", body[:400] + ("..." if len(body) > 400 else ""))
         if v["recommendations"]:
-            print("🔧 Recs:", ", ".join(v["recommendations"]))
+            LOG.info("🔧 Recs: %s", ", ".join(v["recommendations"]))
 
-    print("\n===== 🏷 METADATA =====")
+    LOG.info("===== 🏷 METADATA =====")
     meta = {"classification": result["classification"], "run_id": result["run_id"]}
-    print(json.dumps(meta, indent=2))
+    LOG.info(json.dumps(meta, indent=2))
 
 
 def main() -> None:
     try:
         asyncio.run(main_async())
     except KeyboardInterrupt:
-        print("\n⏹️ Interrupted by user", flush=True)
+        LOG.warning("Interrupted by user")
 
 
 if __name__ == "__main__":

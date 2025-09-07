@@ -18,14 +18,14 @@ try:
         KLINE_MAX_ENTRIES,
     )
     from .utils import AUDIT, cosine, dequantize, hash_embed, quantize
-except ImportError:  # pragma: no cover - fallback for script usage
+except ImportError:
     from config import (
         CLUSTER_LINK_WEIGHT,
         CLUSTER_MIN_SIM,
         KLINE_EMBED_DIM,
         KLINE_MAX_ENTRIES,
     )  # type: ignore
-    from utils import AUDIT, cosine, dequantize, hash_embed, quantize  # type: ignore
+    from utils import AUDIT, cosine, dequantize, hash_embed, quantize
 
 
 class MemoryStore:
@@ -36,6 +36,7 @@ class MemoryStore:
         self.data: Dict[str, Any] = {}
         self._io_lock = threading.RLock()
         self._load()
+        LOG.debug("MemoryStore initialized at %s", self.path)
 
     # ------------------------------- I/O -------------------------------------
 
@@ -45,22 +46,27 @@ class MemoryStore:
                 txt = self.path.read_text(encoding="utf-8")
                 data = json.loads(txt)
                 self.data = data if isinstance(data, dict) else {}
-            except Exception:
+                LOG.info("Loaded memory from %s", self.path)
+            except Exception as e:
+                LOG.error("Failed to load memory file %s: %s", self.path, e)
                 self.data = {}
         if not self.data:
             self.data = {"judges": {}, "patch_stats": {}, "klines": {}, "beliefs": {}, "self_models": {}}
+            LOG.debug("Initialized new memory store")
 
     def save(self) -> None:
         with self._io_lock:
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
             tmp.replace(self.path)
+        LOG.debug("Saved memory to %s", self.path)
 
     # ----------------------------- Judges ------------------------------------
 
     def bump_judge(self, judge: str, delta: float) -> None:
         j = self.data["judges"].setdefault(judge, {"weight": 1.0})
         j["weight"] = max(0.1, min(3.0, j["weight"] + delta))
+        LOG.debug("Judge %s weight adjusted by %.3f -> %.3f", judge, delta, j["weight"])
 
     def get_judge_weight(self, judge: str) -> float:
         return self.data.get("judges", {}).get(judge, {}).get("weight", 1.0)
@@ -70,6 +76,7 @@ class MemoryStore:
     def record_patch(self, kind: str, ok: bool) -> None:
         s = self.data["patch_stats"].setdefault(kind, {"ok": 0, "fail": 0})
         s["ok" if ok else "fail"] += 1
+        LOG.debug("Patch %s recorded: %s", kind, "ok" if ok else "fail")
 
     # ----------------------------- Beliefs -----------------------------------
 
@@ -100,11 +107,13 @@ class MemoryStore:
                 "provenance": prov,
             }
         self.save()
+        LOG.info("Added %d beliefs for sig=%s node=%s", len(claims), sig, node)
 
     def beliefs_for_sig(self, sig: str) -> Dict[str, Any]:
         return {bid: b for bid, b in self.data.get("beliefs", {}).items() if any(p.get("sig") == sig for p in b.get("provenance", []))}
 
     def detect_belief_conflicts(self, *, scope_sig: Optional[str] = None) -> List[Tuple[str, str, Dict[str, Any]]]:
+        LOG.debug("Detecting belief conflicts for scope %s", scope_sig)
         by_key: Dict[Tuple[str, str, Any], Dict[str, Any]] = {}
         conflicts: List[Tuple[str, str, Dict[str, Any]]] = []
         for bid, b in self.data.get("beliefs", {}).items():
@@ -116,6 +125,7 @@ class MemoryStore:
                 conflicts.append((other["id"], bid, {"key": k}))
             else:
                 by_key[k] = {"id": bid, "polarity": b.get("polarity")}
+        LOG.info("Detected %d belief conflicts", len(conflicts))
         return conflicts
 
     # ---------------------------- K-Lines Memory ------------------------------
@@ -126,6 +136,7 @@ class MemoryStore:
     def put_kline(self, sig: str, payload: Dict[str, Any]) -> None:
         self.data["klines"][sig] = payload
         self.save()
+        LOG.debug("Stored kline %s", sig)
 
     def iter_klines(self) -> Iterable[Tuple[str, Dict[str, Any]]]:
         return self.data.get("klines", {}).items()
@@ -158,6 +169,7 @@ class MemoryStore:
             for sig, _ in ks[: len(ks) - max_entries]:
                 self.data["klines"].pop(sig, None)
             self.save()
+            LOG.info("Pruned kline store to %d entries", max_entries)
 
     def upsert_kline(
         self,
@@ -179,12 +191,14 @@ class MemoryStore:
         self.form_clusters()
         self.prune_klines()
         self.save()
+        LOG.info("Upserted kline %s", sig)
 
     def penalize_kline(self, sig: str) -> None:
         entry = self.get_kline(sig)
         if entry:
             entry["penalty"] = entry.get("penalty", 0) + 1
             self.put_kline(sig, entry)
+            LOG.info("Penalized kline %s", sig)
 
     def link_klines(self, sig_a: str, sig_b: str, weight: float) -> None:
         for x, y in ((sig_a, sig_b), (sig_b, sig_a)):
@@ -192,6 +206,7 @@ class MemoryStore:
             links = entry.setdefault("links", {})
             links[y] = max(links.get(y, 0), weight)
             self.put_kline(x, entry)
+        LOG.debug("Linked klines %s <-> %s w=%.3f", sig_a, sig_b, weight)
 
     def cluster_retrieve(self, sig: str, max_neighbors: int = 5) -> List[Tuple[str, float]]:
         entry = self.get_kline(sig) or {}

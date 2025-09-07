@@ -21,8 +21,10 @@ class JudgeRegistry:
 
     def register(self, j: Judge) -> None:
         self._judges.append(j)
+        LOG.debug("Registered judge %s", getattr(j, "name", repr(j)))
 
     def get_all(self) -> List[Judge]:
+        LOG.debug("Retrieving %d judges", len(self._judges))
         return list(self._judges)
 
 
@@ -37,6 +39,7 @@ class StructureJudge:
         score = 0.85
         comments = []
         guidance: Dict[str, float] = {"structure": 0.0, "brevity": 0.0, "evidence": 0.0}
+        LOG.debug("StructureJudge evaluating section '%s'", desired)
         if desired:
             hdr_ok, _ = ensure_header(text, desired)
             if not hdr_ok:
@@ -47,6 +50,7 @@ class StructureJudge:
             score -= 0.15
             guidance["evidence"] += 0.15
             comments.append("Thin content; add details.")
+        LOG.info("StructureJudge score=%.2f guidance=%s", score, guidance)
         return Critique(score, " ".join(comments), guidance)
 
 
@@ -56,6 +60,7 @@ class BrevityJudge:
     async def critique(self, text: str, contract: Contract) -> Critique:
         words = len(re.findall(r"\b\w+\b", text))
         score = 0.9 if 80 <= words <= 1200 else 0.72
+        LOG.info("BrevityJudge words=%d score=%.2f", words, score)
         return Critique(score, "", {"brevity": abs(words - 400) / 400})
 
 
@@ -65,6 +70,7 @@ class ConsistencyJudge:
     async def critique(self, text: str, contract: Contract) -> Critique:
         headers = re.findall(r"^##\s+.+$", text, re.M)
         score = 0.85 if headers else 0.7
+        LOG.info("ConsistencyJudge score=%.2f", score)
         return Critique(score, "", {"structure": 0.1 if not headers else 0.0})
 
 
@@ -79,6 +85,7 @@ class LLMJudge:
 
     async def critique(self, text: str, contract: Contract, *, temperature: float = 0.0, seed=None) -> Critique:
         if not self.solver:
+            LOG.warning("LLM judge unavailable")
             return Critique(0.7, "LLM judge unavailable.", {})
         from .constants import LLM_JUDGE_PROMPT  # lazy import to avoid hard dep
 
@@ -92,8 +99,10 @@ class LLMJudge:
             score = float(data.get("score", 0.72))
             comments = str(data.get("comments", ""))
             guidance = data.get("guidance", {}) if isinstance(data.get("guidance", {}), dict) else {}
+            LOG.info("LLMJudge score=%.2f guidance=%s", score, guidance)
             return Critique(score, comments, guidance)
-        except Exception:
+        except Exception as e:
+            LOG.error("LLM judge error: %s", e)
             return Critique(0.68, "LLM judge error.", {})
 
 
