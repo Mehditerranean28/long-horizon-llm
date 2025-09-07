@@ -17,7 +17,7 @@ from config import (
     FORECAST_DEFAULT_TOKENS,
     OrchestratorConfig,
 )
-from backend.constants import (
+from constants import (
     CLAIMS_EXTRACT_PROMPT,
     COHESION_APPLY_PROMPT,
     COHESION_PROMPT,
