@@ -5,12 +5,12 @@
 PLANNER_PROMPT = (
     "You are a decomposition engine.\n"
     "Return STRICT JSON:\n"
-    "{\"nodes\":["
-    "{\"name\":str,"
+    "{\"nodes\":[{"
+    "\"name\":str,"
     "\"tmpl\":str,"          # template ID, e.g. R3_VALIDATION, A5_PATTERNS, GENERIC
     "\"deps\":[str],"
     "\"role\":\"backbone\"|\"adjunct\""
-    "]}\n"
+    "}]}\n"
     "Rules:\n"
     "- names unique in [a-z0-9_-]\n"
     "- deps only to previously listed nodes\n"
@@ -65,11 +65,13 @@ DEFAULT_PIPELINE_GUIDELINES = (
     "Be precise and fully actionable. Prefer explicit tests and base conditions."
 )
 
-from prompts.cognitive_templates import (
+
+from .prompts.cognitive_templates import (
+
     A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17, A18, A19, A20, A21, A22, A23,
 )
 
-from prompts.reasoning_templates import (
+from .prompts.reasoning_templates import (
     R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11, R12, R13, R14, R15, R16, R17, R18, R19, R20, R21,
 )
 
@@ -174,6 +176,75 @@ HEDGE_UNCERTAINTY_PROMPT = (
     "and avoid fabricating sources. Preserve structure and intent; return ONLY revised markdown.\n"
     "TEXT:\n---\n{text}\n---\n"
     "LOW_CONF_CLAIMS:\n{claims}"
+)
+
+# === Lightweight prompts and helpers ===
+CLASSIFY_QUERY_SCHEMA_HINT = (
+    '{ "type":"object","required":["kind","score"],'
+    '  "properties":{"kind":{"enum":["Atomic","Hybrid","Composite"]},'
+    '"score":{"type":"number"},"rationale":{"type":"string"},'
+    '"cues":{"type":"object"}} }'
+)
+
+CLASSIFY_QUERY_PROMPT = (
+    "SYSTEM: CLASSIFY\n"
+    "Return ONLY a single JSON object. No prose.\n"
+    "Schema (informal): {schema_hint}\n\n"
+    "Task: Classify the user's query by scope/complexity.\n"
+    "- Atomic = single, narrow deliverable; no multi-phase orchestration; no explicit comparisons.\n"
+    "- Hybrid = two or more deliverables OR a compare/contrast OR explicit dependencies/rollout elements.\n"
+    "- Composite = multi-phase plan (objectives/tactics), or broad strategy spanning analysis+design+validation.\n"
+    "Important: a short sentence can still be deep; do NOT use length as a proxy. "
+    "Consider ops depth (SLO/SLA, canary/rollback, observability), advanced CS terms,\n"
+    "comparisons (versus/vs), explicit dependencies (after/before/depends), and enumerations (lists/bullets/commas/conjunctions).\n\n"
+    "Output fields:\n"
+    '- kind: "Atomic" | "Hybrid" | "Composite"\n'
+    "- score: a confidence 0..1 for chosen kind\n"
+    "- rationale: one non-fluffy sentence (optional)\n"
+    "- cues: counts {deliverables, comparisons, dependencies, lists, conjunctions, ops_depth, advanced, length}\n\n"
+    "QUERY:\n{query}"
+)
+
+JSON_PHASE_SYSTEM_PREFIX = "SYSTEM: {phase}\n"
+JSON_PHASE_HEADER_SUFFIX = (
+    "Return ONLY a single JSON object. No prose or markdown.\n"
+    "If unknown, use null or an empty list/string.\n\n"
+)
+JSON_PHASE_REPAIR_SUFFIX = (
+    "\n\nREPAIR:\nSend ONLY valid JSON for the object. No commentary."
+)
+
+CQAP_META_PROMPT = (
+    "Fill the PROTOCOL keys with concise, decision-ready analysis.\n"
+    "- Keep the same keys as PROTOCOL; for nested hints (e.g., PrecisionLevel), return an object.\n"
+    "- Be terse but specific; a short sentence can be deep.\n"
+    "TARGET: {target}\n"
+    "PROTOCOL: {protocol}\n"
+)
+
+MISSION_PLAN_SCHEMA_HINT = {
+    "Strategy": [
+        {
+            "O1": "Objective text",
+            "queries": {"Q1": "question...", "Q2": "question..."},
+            "tactics": [
+                {
+                    "t1": "tactic description",
+                    "dependencies": ["expected_artifact_or_tactic_name"],
+                    "expected_artifact": "file_or_doc_name",
+                }
+            ],
+        }
+    ]
+}
+
+MISSION_PLAN_PROMPT = (
+    "Produce ONLY JSON for a mission plan that can compile into a DAG.\n"
+    "Rules:\n"
+    "- Use keys O1..On (or 'Objective' if needed).\n"
+    "- Each tactic: a 'tX' key, 'dependencies' (names or artifacts), and 'expected_artifact'.\n"
+    "- Prefer explicit dependencies if comparisons/rollouts are implied.\n"
+    "TARGET: {target}\nMETA: {meta}\nSCHEMA_HINT: {schema_hint}\n"
 )
 
 # Fallback if PROMPT_TEMPLATES.get(tmpl) is missing
