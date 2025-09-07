@@ -9,10 +9,13 @@ Target features:
 from __future__ import annotations
 
 import asyncio
+import sys
+from pathlib import Path
 
 import pytest
 
-import blackboard  # import lightweight module directly
+sys.path.append(str(Path(__file__).resolve().parents[2]))
+import backend.mvp.blackboard as blackboard  # import lightweight module from MVP package
 
 
 @pytest.mark.parametrize(

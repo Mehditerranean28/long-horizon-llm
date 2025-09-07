@@ -9,10 +9,10 @@ import json
 import os
 from pathlib import Path
 
-from config import OrchestratorConfig
-from execution import Orchestrator
-from memory import MemoryStore
-from solver import build_default_solver_and_planner
+from .config import OrchestratorConfig
+from .execution import Orchestrator
+from .memory import MemoryStore
+from .solver import build_default_solver_and_planner
 
 
 async def main_async() -> None:
@@ -33,7 +33,7 @@ async def main_async() -> None:
     solver = planner = None
     if not args.mock:
         try:
-            from adapters import build_pipeline_solver_and_planner  # optional external
+            from ..adapters import build_pipeline_solver_and_planner  # optional external
             solver, planner = await build_pipeline_solver_and_planner(use_mock_llm=False)
         except Exception:
             pass

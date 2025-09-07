@@ -11,13 +11,13 @@ import uuid
 from dataclasses import asdict
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from config import (
+from .config import (
     FORECAST_ALPHA,
     FORECAST_BUFFER,
     FORECAST_DEFAULT_TOKENS,
     OrchestratorConfig,
 )
-from constants import (
+from .constants import (
     CLAIMS_EXTRACT_PROMPT,
     COHESION_APPLY_PROMPT,
     COHESION_PROMPT,
@@ -25,10 +25,10 @@ from constants import (
     NODE_APPLY_PROMPT,
     NODE_RECOMMEND_PROMPT,
 )
-from judges import JUDGES
-from memory import MemoryStore
-from planning import classify_query_llm, make_plan
-from bb_types import (
+from .judges import JUDGES
+from .memory import MemoryStore
+from .planning import classify_query_llm, make_plan
+from .bb_types import (
     Artifact,
     BlackBoxSolver,
     Contract,
@@ -38,7 +38,7 @@ from bb_types import (
     Plan,
     QAResult,
 )
-from utils import (
+from .utils import (
     AUDIT,
     GLOBAL_LIMITER,
     LOG,
@@ -225,7 +225,7 @@ class Orchestrator:
         deps_preview = self._deps_bullets(context_txt, node, blackboard)
         template = node.prompt_override or ""
         if not template:
-            from constants import TEMPLATE_REGISTRY
+            from .constants import TEMPLATE_REGISTRY
             template = TEMPLATE_REGISTRY.get(node.tmpl, TEMPLATE_REGISTRY["GENERIC"])
         section = node.contract.format.get("markdown_section") or node.name.title()
         base = fmt(template, section=section, deps_bullets=deps_preview, query=self._current_query)

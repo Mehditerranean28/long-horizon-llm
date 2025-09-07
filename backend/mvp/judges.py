@@ -7,8 +7,8 @@ import re
 from dataclasses import asdict
 from typing import Dict, List
 
-from bb_types import Contract, Critique, Judge
-from utils import ensure_header
+from .bb_types import Contract, Critique, Judge
+from .utils import ensure_header
 
 
 class JudgeRegistry:
@@ -76,13 +76,13 @@ class LLMJudge:
     async def critique(self, text: str, contract: Contract, *, temperature: float = 0.0, seed=None) -> Critique:
         if not self.solver:
             return Critique(0.7, "LLM judge unavailable.", {})
-        from constants import LLM_JUDGE_PROMPT  # lazy import to avoid hard dep
+        from .constants import LLM_JUDGE_PROMPT  # lazy import to avoid hard dep
 
         prompt = LLM_JUDGE_PROMPT.format(text=text, contract=str(asdict(contract)))
         try:
             res = await self.solver.solve(prompt, {"mode": "judge"})
             import json
-            from utils import first_json_object, safe_json_loads
+            from .utils import first_json_object, safe_json_loads
 
             data = safe_json_loads(first_json_object(res.text) or "{}") or {}
             score = float(data.get("score", 0.72))
