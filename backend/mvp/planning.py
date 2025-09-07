@@ -7,9 +7,22 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional
 
-from constants import PLANNER_PROMPT  # prompt strings live in constants.py
-from bb_types import Classification, Contract, Node, Plan, TestSpec
-from utils import fmt, first_json_object, safe_json_loads, slug
+try:
+    from .constants import (
+        CLASSIFY_QUERY_PROMPT,
+        CLASSIFY_SCHEMA_HINT,
+        PLANNER_PROMPT,
+    )
+    from .bb_types import Classification, Contract, Node, Plan, TestSpec
+    from .utils import fmt, first_json_object, safe_json_loads, slug
+except ImportError:  # pragma: no cover - fallback for script usage
+    from constants import (
+        CLASSIFY_QUERY_PROMPT,
+        CLASSIFY_SCHEMA_HINT,
+        PLANNER_PROMPT,
+    )  # type: ignore
+    from bb_types import Classification, Contract, Node, Plan, TestSpec  # type: ignore
+    from utils import fmt, first_json_object, safe_json_loads, slug  # type: ignore
 
 # Heuristics for classifier
 _DELIVERABLE = re.compile(r"\b(design|architecture|spec|contract|roadmap|benchmark|compare|trade[- ]?offs?|rfc|plan|protocol|implementation|experiment|evaluate)\b", re.I)
@@ -35,8 +48,7 @@ def classify_query(query: str) -> Classification:
 async def classify_query_llm(query: str, llm, *, timeout: float = 15.0) -> Classification:
     if llm is None:
         return classify_query(query)
-    schema_hint = '{ "kind":"Atomic|Hybrid|Composite","score":0..1,"rationale":"...","cues":{...} }'
-    prompt = f"SYSTEM: CLASSIFY\nReturn ONLY JSON.\nSchema: {schema_hint}\nTask: Classify scope/complexity.\nQUERY: {query}"
+    prompt = fmt(CLASSIFY_QUERY_PROMPT, schema=CLASSIFY_SCHEMA_HINT, query=query)
     try:
         raw = await llm.complete(prompt, temperature=0.0, timeout=timeout)
         data = safe_json_loads(first_json_object(raw) or "{}"); data = data or {}

@@ -1,8 +1,16 @@
 # -*- coding: utf-8 -*-
 """Minimal prompt constants for the orchestrator modules."""
 
-# Planning prompt
+# Planning & classification prompts
 PLANNER_PROMPT = "PLAN: {q}\n{hints}"
+CLASSIFY_SCHEMA_HINT = '{ "kind":"Atomic|Hybrid|Composite","score":0..1,"rationale":"...","cues":{...} }'
+CLASSIFY_QUERY_PROMPT = (
+    "SYSTEM: CLASSIFY\n"
+    "Return ONLY JSON.\n"
+    "Schema: {schema}\n"
+    "Task: Classify scope/complexity.\n"
+    "QUERY: {query}"
+)
 
 # Node-related prompts
 ANALYSIS_NODE_PROMPT = "Analyze the query: {query}"
@@ -30,3 +38,9 @@ TEMPLATE_CONTRACTS = {}
 
 # LLM judge prompt placeholder
 LLM_JUDGE_PROMPT = "Judge the text:\n{text}\nContract: {contract}"
+
+# Demo defaults
+DEFAULT_DEMO_QUERY = (
+    "Design a secure CRUD API. Provide architecture, data model, and risks. "
+    "Compare 2 frameworks and give a migration plan."
+)

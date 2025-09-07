@@ -7,8 +7,12 @@ import re
 from dataclasses import asdict
 from typing import Dict, List
 
-from bb_types import Contract, Critique, Judge
-from utils import ensure_header
+try:
+    from .bb_types import Contract, Critique, Judge
+    from .utils import ensure_header
+except ImportError:  # pragma: no cover - fallback for script usage
+    from bb_types import Contract, Critique, Judge  # type: ignore
+    from utils import ensure_header  # type: ignore
 
 
 class JudgeRegistry:
