@@ -21,6 +21,11 @@ PLANNER_PROMPT = (
     "{q}\n"
 )
 
+# Generic safety constraint appended to prompts
+SAFETY_CONSTRAINT_PROMPT = (
+    "Always prioritize safety, ethics, and compliance with guidelines in all outputs."
+)
+
 
 # === Mission planning / adapters ===
 MISSION_START_TOKEN = "<<<MISSION_JSON>>>"

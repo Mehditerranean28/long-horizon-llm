@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 
+from importlib import import_module
 import numpy as np
 import asyncio
 import json
@@ -11,7 +12,6 @@ import hashlib
 import math
 import heapq
 import random
-import statistics
 import uuid
 import os
 import re
@@ -31,6 +31,7 @@ from typing import (
     Optional,
     Protocol,
     Sequence,
+    Type,
     Set,
     Tuple,
     runtime_checkable,
@@ -76,6 +77,7 @@ from .constants import (
     CLASSIFY_QUERY_SCHEMA_HINT,
     JSON_PHASE_SYSTEM_PREFIX,
     JSON_PHASE_HEADER_SUFFIX,
+    SAFETY_CONSTRAINT_PROMPT,
     JSON_PHASE_REPAIR_SUFFIX,
     CQAP_META_PROMPT,
     MISSION_PLAN_PROMPT,
@@ -91,6 +93,11 @@ _GLOBAL_BURST_WINDOW = float(os.getenv("GLOBAL_BURST_WINDOW", "1.0"))
 KLINE_EMBED_DIM = int(os.getenv("KLINE_EMBED_DIM", "256"))
 KLINE_MAX_ENTRIES = int(os.getenv("KLINE_MAX_ENTRIES", "2000"))
 AUDIT_MAX_CHARS = int(os.getenv("AUDIT_MAX_CHARS", "8192"))
+WAR_ROOM_LOG_INTERVAL = float(os.getenv("WAR_ROOM_LOG_INTERVAL", "5.0"))
+SAFETY_INJECT_ENABLE = bool(int(os.getenv("SAFETY_INJECT_ENABLE", "1")))
+SAFETY_INJECT_ROLES = {
+    r.strip().lower() for r in os.getenv("SAFETY_INJECT_ROLES", "backbone,adjunct").split(",") if r.strip()
+}
 
 # Heuristic tuning parameters
 CLUSTER_MIN_SIM = 0.3
@@ -127,6 +134,31 @@ class PlanningError(BlackboardError): ...
 class QAError(BlackboardError): ...
 class ExecutionError(BlackboardError): ...
 class CompositionError(BlackboardError): ...
+
+def _inject_safety(t: Optional[str]) -> str:
+    """Append a general safety constraint to any prompt-ish string."""
+    base = (t or "").rstrip()
+    if not base:
+        return SAFETY_CONSTRAINT_PROMPT.strip()
+    if re.search(r"\bsafety\b", base, re.IGNORECASE):
+        return base
+    return f"{base}\n\n{SAFETY_CONSTRAINT_PROMPT.strip()}"
+
+def _war_room_snapshot(
+    blackboard: Dict[str, Any],
+    indeg: Dict[str, int],
+    energy: float,
+    objective: Mapping[str, Any],
+    dial: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Compact snapshot for external monitoring."""
+    return {
+        "blackboard_keys": list(blackboard.keys()),
+        "pending_indeg": {k: v for k, v in indeg.items() if v > 0},
+        "energy": energy,
+        "objective": dict(objective),
+        "dial": dict(dial),
+    }
 
 _CTRL = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F]')
 
@@ -377,8 +409,13 @@ class MemoryStore:
                 self.data.setdefault("patch_stats", {})
                 self.data.setdefault("klines", {})
                 self.data.setdefault("beliefs", {})
+                self.data.setdefault("dials", {})       # sig -> stats
+                self.data.setdefault("objectives", {})  # sig -> {"mode":..., "ts":...}
             else:
-                self.data = {"judges": {}, "patch_stats": {}, "klines": {}, "beliefs": {}}
+                self.data = {
+                    "judges": {}, "patch_stats": {}, "klines": {}, "beliefs": {},
+                    "dials": {}, "objectives": {}
+                }
         except Exception as e:
             _LOG.exception("MemoryStore load failed: %s", e)
             try:
@@ -388,7 +425,10 @@ class MemoryStore:
                     _LOG.warning("quarantined corrupt memory to %s", bak)
             except Exception:
                 pass
-            self.data = {"judges": {}, "patch_stats": {}, "klines": {}, "beliefs": {}}
+            self.data = {
+                "judges": {}, "patch_stats": {}, "klines": {}, "beliefs": {},
+                "dials": {}, "objectives": {}
+            }
     def save(self) -> None:
         with self._io_lock:
             tmp = self.path.with_suffix(".tmp")
@@ -406,6 +446,40 @@ class MemoryStore:
         s = self.data.setdefault("patch_stats", {}).setdefault(kind, {"ok": 0, "fail": 0})
         s["ok" if ok else "fail"] += 1
     # === Belief store (claim-level knowledge) ===
+    # --- Citizen dial time-series (sig-scoped) ---
+    def record_dial(self, sig: str, value: float) -> None:
+        try:
+            v = float(value)
+        except Exception:
+            return
+        v = max(-1.0, min(1.0, v))
+        d = self.data.setdefault("dials", {}).setdefault(sig, {"series": []})
+        series = d.setdefault("series", [])
+        series.append(v)
+        if len(series) > 100:
+            del series[:-100]
+        arr = np.array(series, dtype=float)
+        d["mean"] = float(arr.mean())
+        d["std"] = float(arr.std()) if len(arr) > 1 else 0.0
+        d["trend"] = float((series[-1] - series[0]) / len(series)) if len(series) > 1 else 0.0
+        self.save()
+    def avg_dial(self, sig: str) -> float:
+        d = self.data.setdefault("dials", {}).get(sig, {})
+        return float(d.get("mean", 0.0))
+    def dial_query(self, sig: str) -> Dict[str, Any]:
+        d = self.data.setdefault("dials", {}).get(sig, {})
+        return {
+            "series": list(d.get("series", [])),
+            "mean": float(d.get("mean", 0.0)),
+            "std": float(d.get("std", 0.0)),
+            "trend": float(d.get("trend", 0.0)),
+        }
+    def set_objective_for_sig(self, sig: str, mode: str, weights: Optional[Mapping[str, float]] = None) -> None:
+        entry: Dict[str, Any] = {"mode": str(mode), "ts": time.time()}
+        if weights:
+            entry["weights"] = {str(k): float(v) for k, v in weights.items()}
+        self.data.setdefault("objectives", {})[sig] = entry
+        self.save()
     @staticmethod
     def _belief_id(claim: Mapping[str, Any]) -> str:
         # stable id from canonicalized fields
@@ -1101,9 +1175,13 @@ def build_plan_from_cqap(query: str, proto: Mapping[str, Any], cls: "Classificat
 
     def add_node(key: str, *, role: str = "adjunct", deps: Optional[List[str]] = None, min_words: Optional[int] = None) -> None:
         name = _slug(key, key)
+        prompt_override = None
+        if SAFETY_INJECT_ENABLE and role in SAFETY_INJECT_ROLES:
+            prompt_override = _inject_safety(None)
         nodes.append(
             Node(
                 name=name,
+                prompt_override=prompt_override,
                 tmpl="GENERIC",
                 deps=list(deps or []),
                 contract=mk_contract(_title(key), min_words=min_words),
@@ -1203,8 +1281,10 @@ def _validate_and_repair_plan(nodes: List[Node]) -> List[Node]:
             if indeg[n.name] > 0: n.deps = []
     return nodes
 
-async def make_plan(llm: PlannerLLM, query: str, cls: Classification) -> Plan:
+async def make_plan(llm: PlannerLLM, query: str, cls: Classification, *, governance_hint: Optional[str] = None) -> Plan:
     prompt = _fmt(PLANNER_PROMPT, q=query)
+    if governance_hint:
+        prompt = f"## Governance\n{governance_hint.strip()}\n\n" + prompt
     try:
         raw = await llm.complete(prompt, temperature=0.0, timeout=60.0)
     except Exception as e:
@@ -1230,7 +1310,11 @@ async def make_plan(llm: PlannerLLM, query: str, cls: Classification) -> Plan:
             role = str(nd.get("role") or ("backbone" if i == 0 else "adjunct")).lower()
             prompt_override = None
             if isinstance(nd.get("prompt"), str) and nd["prompt"].strip():
-                prompt_override = nd["prompt"].strip()
+                raw_prompt = nd["prompt"].strip()
+                if SAFETY_INJECT_ENABLE and role in SAFETY_INJECT_ROLES:
+                    prompt_override = _inject_safety(raw_prompt)
+                else:
+                    prompt_override = raw_prompt
             # Contract: prefer planner-supplied contract if present; otherwise use template defaults.
             planner_contract_obj = nd.get("contract")
             if isinstance(planner_contract_obj, dict):
@@ -1374,6 +1458,18 @@ class BrevityJudge:
             comments.append(TOO_SHORT_HINT)
         return Critique(score=max(0.0, min(1.0, score)), comments=" ".join(comments), guidance=guidance)
 
+@dataclass(slots=True)
+class AlignmentJudge:
+    name: str = "alignment"
+    async def critique(self, text: str, contract: Contract) -> Critique:
+        # Heuristic: penalize efficiency-only language without safety/ethics
+        lower = text.lower()
+        score = 0.8
+        if ("efficiency" in lower or "optimiz" in lower) and ("safety" not in lower and "ethic" not in lower):
+            score -= 0.2
+        return Critique(score=max(0.0, score), comments="Alignment check: balance efficiency with safety/ethics.",
+                        guidance={"evidence": 0.2 if score < 0.8 else 0.0, "structure":0.0,"brevity":0.0})
+
 class JudgeRegistry:
     def __init__(self) -> None:
         self._judges: Dict[str, Judge] = {}
@@ -1385,6 +1481,7 @@ class JudgeRegistry:
 JUDGES = JudgeRegistry()
 JUDGES.register(StructureJudge())
 JUDGES.register(ConsistencyJudge())
+JUDGES.register(AlignmentJudge())
 JUDGES.register(BrevityJudge())
 
 # (optional) Veracity judge could be added here in future; kept minimal for now.
@@ -1463,6 +1560,14 @@ async def draft_resolution(solver: BlackBoxSolver, conflicts: List[Tuple[str, st
         lines.append(f"### {str(subj).title()}"); lines.append(text.strip()); lines.append("")
     return "\n".join(lines).strip()
 
+# ===== Objective Protocol & Implementations =====
+@runtime_checkable
+class Objective(Protocol):
+    name: str
+    def utility(self, *, used_tokens: int, max_tokens: int, avg_score: float,
+                failure_rate: float, contradictions: int, dial: float) -> float: ...
+    def goal_summary(self) -> str: ...
+
 @dataclass(slots=True)
 class OrchestratorConfig:
     concurrent: int = int(os.getenv("LOCAL_CONCURRENT", "6"))
@@ -1492,7 +1597,17 @@ class OrchestratorConfig:
     consistency_sampling_enable: bool = bool(int(os.getenv("CONSISTENCY_SAMPLING_ENABLE", "1")))
     consistency_samples: int = int(os.getenv("CONSISTENCY_SAMPLES", "3"))
     agreement_threshold: float = float(os.getenv("AGREEMENT_THRESHOLD", "0.55"))
-
+    # Objective/cybernetic control
+    custom_objective_path: Optional[str] = os.getenv("CUSTOM_OBJECTIVE_PATH", None)  # "pkg.Mod:Class"
+    objective_mode: str = os.getenv("OBJECTIVE_MODE", "hybrid")  # "market"|"social"|"hybrid"
+    objective_weights_json: str = os.getenv("OBJECTIVE_WEIGHTS_JSON", "")
+    energy_setpoint: float = float(os.getenv("ENERGY_SETPOINT", "0.5"))
+    dial_influence_factor: float = float(os.getenv("DIAL_INFLUENCE_FACTOR", "0.1"))
+    trace_objective: bool = bool(int(os.getenv("TRACE_OBJECTIVE", "1")))
+    safety_inject_enable: bool = bool(int(os.getenv("SAFETY_INJECT_ENABLE", "1")))
+    safety_inject_roles: str = os.getenv("SAFETY_INJECT_ROLES", "backbone,adjunct")
+    resolution_node_enable: bool = bool(int(os.getenv("RESOLUTION_NODE_ENABLE", "1")))
+    redundancy_enable: bool = bool(int(os.getenv("REDUNDANCY_ENABLE", "1")))
 @dataclass(slots=True)
 class Orchestrator:
     solver: BlackBoxSolver
@@ -1512,6 +1627,11 @@ class Orchestrator:
     _last_energy: Optional[float] = None
     _current_sig: Optional[str] = None
     _current_query: str = ""
+    _objective_cached: Optional[Objective] = None
+    _objective_cache_key: Optional[Tuple[str, str]] = None  # (mode, weights_json)
+    _last_war_snapshot: Optional[Dict[str, Any]] = None
+    _unstable_flag: bool = False
+    _last_objective_features: Dict[str, Any] = field(default_factory=dict)
 
     @staticmethod
     def _approx_tokens(text: str) -> int:
@@ -1634,6 +1754,71 @@ class Orchestrator:
         res = winner.result()
         return self._coerce_solver_result(res)
 
+    # ---- Objective plumbing ----
+    def _objective(self) -> Objective:
+        key = (self.config.objective_mode, self.config.objective_weights_json or "")
+        if self._objective_cached is not None and self._objective_cache_key == key:
+            return self._objective_cached
+        mode = self.config.objective_mode or "hybrid"
+        weights_map: Optional[Dict[str, float]] = None
+        # custom path registration
+        if self.config.custom_objective_path:
+            mod, _, cls = self.config.custom_objective_path.partition(":")
+            try:
+                K = getattr(import_module(mod), cls)
+                obj = K()
+                OBJECTIVES.register(obj)
+                try:
+                    _AUDIT.info(json.dumps({"objective_load": {"custom": self.config.custom_objective_path}}, ensure_ascii=False))
+                except Exception:
+                    pass
+            except Exception as e:
+                _LOG.warning("Failed to load custom objective '%s': %s", self.config.custom_objective_path, e)
+        def _load(name: str) -> Objective:
+            obj = OBJECTIVES.get(name)
+            if obj:
+                return obj
+            obj = _preset_objective(name, self.config.objective_weights_json)
+            OBJECTIVES.register(obj)
+            return obj
+        obj: Objective
+        if "+" in mode:
+            parts, wstr = mode.split("@", 1) if "@" in mode else (mode, "")
+            names = [p.strip() for p in parts.split("+") if p.strip()]
+            w = float(wstr) if wstr else 0.5
+            if len(names) >= 2:
+                o1 = _load(names[0])
+                o2 = _load(names[1])
+                weights_map = {names[0]: w, names[1]: 1.0 - w}
+                obj = BlendObjective(name=f"{names[0]}_{names[1]}_blend", components=[(o1, w), (o2, 1.0 - w)])
+            else:
+                obj = _load(names[0])
+        else:
+            obj = _load(mode)
+            if hasattr(obj, "weights"):
+                weights_map = getattr(obj, "weights")
+        self._objective_cached = obj
+        self._objective_cache_key = key
+        if weights_map:
+            try:
+                _AUDIT.info(json.dumps({"objective_load": {"mode": mode, "weights": weights_map}}, ensure_ascii=False))
+            except Exception:
+                pass
+        return obj
+
+    def query_objective(self) -> Dict[str, Any]:
+        obj = self._objective()
+        return {"name": getattr(obj, "name", type(obj).__name__),
+                "summary": obj.goal_summary(),
+                "last_energy": self._last_energy}
+    def get_dial(self) -> float:
+        return self.memory.avg_dial(self._current_sig or "") if self._current_sig else 0.0
+    def set_dial(self, value: float) -> None:
+        if self._current_sig:
+            self.memory.record_dial(self._current_sig, value)
+    def dial_query(self) -> Dict[str, Any]:
+        return self.memory.dial_query(self._current_sig or "") if self._current_sig else {}
+
     async def _run_judges(self, text: str, contract: Contract) -> List[Critique]:
         judges = self.judges or JUDGES.get_all()
         async def _one(j: Judge) -> Critique:
@@ -1698,6 +1883,12 @@ class Orchestrator:
                 if scores.count(s) / len(scores) >= (2 / 3):
                     final = s
                     break
+            # market-aware tiny nudge when still ambiguous: prefer leaner outputs
+            if final is None:
+                try:
+                    final = mean  # fall back; per-candidate market scoring is applied elsewhere
+                except Exception:
+                    final = mean
             if final is None:
                 final = sum(c.score * w for c, w in zip(critiques, weights)) / (sum(weights) or 1.0)
         deliberation_log: Dict[str, Any] = {}
@@ -1797,6 +1988,34 @@ class Orchestrator:
     def _sig(self, query: str, cls_kind: str) -> str:
         key = (cls_kind + ":" + re.sub(r"\s+", " ", query).strip().lower())[:512]
         return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+
+    async def _execute_node_with_redundancy(self, node: Node, blackboard: Dict[str, Artifact]) -> Artifact:
+        """Run node multiple times and select via market-aware sampling."""
+        samples = max(2, self.config.consistency_samples if self.config.consistency_sampling_enable else 2)
+        tasks = [asyncio.create_task(self._execute_node(node, blackboard)) for _ in range(samples)]
+        arts = await asyncio.gather(*tasks)
+        scores: List[float] = []
+        for a in arts:
+            judge = self.deliberate_judges(a.critiques) if a.critiques else 0.7
+            cost = max(0.0, min(1.0, self._approx_tokens(a.content) / max(1, self.config.max_tokens_per_node)))
+            market = (judge + (0.1 if a.qa.ok else 0.0)) - 0.1 * cost
+            scores.append(market)
+        if samples > 2:
+            weights = [max(s, 0.0) for s in scores]
+            total = sum(weights)
+            if total <= 0:
+                idx = 0
+            else:
+                r = random.random() * total
+                cum = 0.0
+                idx = 0
+                for i, w in enumerate(weights):
+                    cum += w
+                    if cum >= r:
+                        idx = i
+                        break
+            return arts[idx]
+        return arts[0] if scores[0] >= scores[1] else arts[1]
 
     async def _guidance_summary(self, text: str, contract: Contract) -> str:
         qa = run_tests(text, contract)
@@ -2066,6 +2285,11 @@ class Orchestrator:
                 self._score_history[:] = self._score_history[-50:]
             except Exception:
                 pass
+        if self.config.trace_objective:
+            try:
+                market_cost = max(0.0, min(1.0, self._approx_tokens(art.content) / max(1, self.config.max_tokens_per_node)))
+                _AUDIT.info(json.dumps({"node_objective_trace": {"node": node.name, "judge_score": self.deliberate_judges(art.critiques) if art.critiques else None, "market_cost": market_cost}}, ensure_ascii=False))
+            except Exception: pass
         try:
             self.stability_check()
         except Exception:
@@ -2117,8 +2341,11 @@ class Orchestrator:
         blackboard: Dict[str, Artifact] = {}
         ready = [n for n in nodes if indeg[n.name] == 0]
         in_flight: Dict[str, asyncio.Task[Artifact]] = {}
+        last_log = time.time()
         async def run_with_sem(n: Node) -> Artifact:
             async with sem:
+                if self.config.redundancy_enable and n.role == "backbone":
+                    return await self._execute_node_with_redundancy(n, blackboard)
                 return await self._execute_node(n, blackboard)
         for n in ready:
             in_flight[n.name] = asyncio.create_task(run_with_sem(n))
@@ -2161,6 +2388,26 @@ class Orchestrator:
                             continue
                     else:
                         raise ExecutionError(f"node execution failed: {e}") from e
+                # periodic war-room telemetry
+                now = time.time()
+                interval = WAR_ROOM_LOG_INTERVAL * (0.5 if self._unstable_flag else 1.0)
+                if (now - last_log) > interval:
+                    snap = _war_room_snapshot(
+                        blackboard,
+                        indeg,
+                        getattr(self, "_last_energy", 0.0),
+                        {"name": self._objective().name, **self._last_objective_features},
+                        self.memory.dial_query(self._current_sig or "")
+                    )
+                    delta = None
+                    if self._last_war_snapshot:
+                        delta = {
+                            "energy": snap.get("energy", 0.0) - self._last_war_snapshot.get("energy", 0.0),
+                            "dial_mean": snap["dial"].get("mean", 0.0) - self._last_war_snapshot.get("dial", {}).get("mean", 0.0),
+                        }
+                    self._audit_event("dag", "war_room", output={"snapshot": snap, "delta": delta})
+                    self._last_war_snapshot = snap
+                    last_log = now
                 # ✅ Store the finished artifact so deps & composer can see it
                 blackboard[art.node] = art
                 for m in succ[art.node]:
@@ -2246,7 +2493,10 @@ class Orchestrator:
             scored: List[Tuple[float, int]] = []
             for i in tied:
                 crits = await self._run_judges(candidates[i].text, node.contract)
-                scored.append((self.deliberate_judges(crits), i))
+                judge_score = self.deliberate_judges(crits)
+                cost = max(0.0, min(1.0, (self._approx_tokens(candidates[i].text) / max(1, self.config.max_tokens_per_node))))
+                market = judge_score - 0.1 * cost
+                scored.append((market, i))
             scored.sort(reverse=True)
             best_idx = scored[0][1]
 
@@ -2317,11 +2567,9 @@ class Orchestrator:
         except Exception:
             recs, revised = [], composed
         if self.config.apply_global_recs and recs:
-            apply_prompt = _fmt(
-                COHESION_APPLY_PROMPT,
-                recs="\n- ".join(recs),
-                document=revised,
-            )
+            apply_prompt = _fmt(COHESION_APPLY_PROMPT,
+                                recs="\n- ".join(recs + ["Ensure cybernetic feedback for self-correction."]),
+                                document=revised)
             try:
                 rr = await self._hedged_solve(apply_prompt, {"mode":"cohesion_apply"}, timeout=45.0)
                 revised = rr.text
@@ -2336,6 +2584,8 @@ class Orchestrator:
         self._audit_event("orchestrator", "start", input={"query": query})
         if self.judges is None:
             self.judges = JUDGES.get_all()
+        # Persist objective mode for this signature (audit)
+        # -> will set after sig computed
         if self.config.enable_llm_judge:
             self.judges = list(self.judges) + [LLMJudge(solver=self.solver)]
 
@@ -2350,8 +2600,26 @@ class Orchestrator:
         sig = self._sig(query, cls.kind)
         self._current_sig = sig
         self._current_query = query
+        obj = self._objective()
+        try:
+            weights = getattr(obj, "weights", None)
+            self.memory.set_objective_for_sig(sig, self.config.objective_mode, weights)
+        except Exception:
+            pass
         monitor = asyncio.create_task(self.Homeostat().monitor(self))
         try:
+            dial_avg = self.get_dial()
+            gov_hint = obj.goal_summary()
+            if dial_avg < -0.2:
+                gov_hint += "; User satisfaction low: prioritize clarity"
+            elif dial_avg > 0.5:
+                gov_hint += "; User satisfaction high"
+            try:
+                k = self.memory.get_kline(sig) or {}
+                k["planning_hint"] = gov_hint
+                self.memory.put_kline(sig, k)
+            except Exception:
+                pass
             # === 1) Build a plan (mission > CQAP > fallback planner) ===
             plan: Optional[Plan] = None
             if self.mission_plan and self.config.plan_from_meta:
@@ -2368,7 +2636,7 @@ class Orchestrator:
                     _LOG.warning("cqap→plan failed: %s", e)
                     plan = None
             if plan is None:
-                plan = await make_plan(self.planner_llm, query, cls)
+                plan = await make_plan(self.planner_llm, query, cls, governance_hint=gov_hint)
 
             # === 2) Execute DAG with adaptive parallelism ===
             blackboard = await self.adaptive_run_dag(plan.nodes)
@@ -2389,6 +2657,37 @@ class Orchestrator:
                     self.memory.penalize_kline(sig)
                 except Exception:
                     pass
+
+            # === 3b) Inject Resolution as a real backbone node if present ===
+            if resolution and self.config.resolution_node_enable:
+                conf_nodes: Set[str] = set()
+                try:
+                    for a_id, b_id, _ in bconf:
+                        for bid in (a_id, b_id):
+                            belief = beliefs_scope.get(bid) or {}
+                            for prov in belief.get("provenance", []) or []:
+                                n = prov.get("node")
+                                if n:
+                                    conf_nodes.add(n)
+                except Exception:
+                    pass
+                deps = [n for n in conf_nodes if any(n == p.name for p in plan.nodes)]
+                min_words = 40 + 10 * len(bconf)
+                if deps:
+                    res_node = Node(
+                        name="resolution",
+                        tmpl="GENERIC",
+                        deps=deps,
+                        contract=mk_contract("Contradiction Resolution", min_words=min_words),
+                        role="backbone",
+                    )
+                    plan.nodes.append(res_node)
+                    blackboard["resolution"] = Artifact(
+                        node="resolution",
+                        content=resolution,
+                        qa=run_tests(resolution, res_node.contract),
+                        critiques=[],
+                    )
 
             # === 4) Compose and cohesion pass ===
             composed = self._compose(plan, blackboard, include_resolution=resolution)
@@ -2446,6 +2745,7 @@ class Orchestrator:
                 "final": final_cohesive,
                 "global_recommendations": global_recs,
                 "run_id": run_id,
+                "objective": self.query_objective(),
             }
             return result
         finally:
@@ -2491,39 +2791,179 @@ class Orchestrator:
         return (ma + s) / 2.0
 
     def stability_check(self) -> bool:
-        """Lyapunov-style stability metric."""
+        """
+        Cybernetic stability with explicit objective function & citizen dial feedback.
+        Energy = 1 - utility; we target energy_setpoint.
+        """
         max_tokens = max(1, self.config.max_tokens_per_run)
         used = min(self._tokens_used, max_tokens)
         avg_score = sum(self._score_history) / len(self._score_history) if self._score_history else 1.0
         arts = getattr(self, "_last_artifacts", {}) or {}
         failures = sum(1 for a in arts.values() if getattr(a, "status", "") != "ok")
-        total = len(arts) or 1
-        failure_rate = failures / total
-        alpha, beta, gamma = 0.4, 0.4, 0.2
-        energy = alpha * (used / max_tokens) + beta * (1 - avg_score) + gamma * failure_rate
-        unstable = False
-        if self._last_energy is not None and energy > self._last_energy + 1e-6:
-            unstable = True
+        total = len(arts)
+        failure_rate = (failures / total) if total > 0 else 0.0
+        try:
+            bconf = self.memory.detect_belief_conflicts(scope_sig=self._current_sig or "")
+            contradictions = min(10, len(bconf))  # cap for normalization
+        except Exception:
+            contradictions = 0
+        dial_stats = self.memory.dial_query(self._current_sig or "") if self._current_sig else {}
+        dial = float(dial_stats.get("mean", 0.0))
+        dial_std = float(dial_stats.get("std", 0.0))
+
+        # Compute features for objective
+        cost_inv = 1.0 - max(0.0, min(1.0, used / max_tokens))
+        qual = max(0.0, min(1.0, avg_score))
+        reliability = max(0.0, min(1.0, (1.0 - failure_rate) * (1.0 - min(1.0, dial_std))))
+        safe = max(0.0, min(1.0, 1.0 - contradictions / 5.0))
+        sat01 = (max(-1.0, min(1.0, dial)) + 1.0) / 2.0
+        feats = {"cost_inv": cost_inv, "quality": qual, "reliability": reliability, "safety": safe, "satisfaction": sat01}
+
+        # Resolve objective and compute utility
+        obj = self._objective()
+        util = None
+        auto_adj: Dict[str, Any] = {}
+        try:
+            # If it's a simple weighted objective, apply optional dial influence on satisfaction weight
+            if hasattr(obj, "weights"):
+                weights = dict(getattr(obj, "weights"))
+                if self.config.dial_influence_factor:
+                    if dial < -0.2:
+                        delta = 0.1 * self.config.dial_influence_factor
+                        weights["satisfaction"] = max(0.0, min(1.0, weights.get("satisfaction", 0.0) + delta))
+                        auto_adj["weights+satisfaction"] = weights["satisfaction"]
+                    elif dial > 0.5:
+                        delta = 0.05 * self.config.dial_influence_factor
+                        weights["satisfaction"] = max(0.0, min(1.0, weights.get("satisfaction", 0.0) + delta))
+                        auto_adj["weights+satisfaction"] = weights["satisfaction"]
+                total_w = sum(weights.values()) or 0.0
+                if total_w <= 0:
+                    util = 0.5
+                else:
+                    util = sum(weights.get(k, 0.0) * feats[k] for k in feats) / total_w
+            else:
+                util = obj.utility(used_tokens=used, max_tokens=max_tokens, avg_score=avg_score,
+                                   failure_rate=failure_rate, contradictions=contradictions, dial=dial)
+        except Exception as e:
+            _LOG.warning("objective utility failed: %s", e)
+            util = max(0.0, min(1.0, (qual + reliability) / 2.0))
+
+        energy = 1.0 - max(0.0, min(1.0, util))
+        if self._last_energy is not None:
+            delta = energy - self._last_energy
+            if abs(delta) > 0.3:
+                energy = self._last_energy + (0.3 if delta > 0 else -0.3)
+
+        unstable = energy > self.config.energy_setpoint + 1e-6
+        self._unstable_flag = unstable
         try:
             self._last_energy = energy
         except Exception:
             pass
         if unstable:
-            self.Homeostat().adjust(self)  # Adjust controller when unstable.
-        self._last_energy = energy
+            self.Homeostat().adjust(self)
+        self._last_objective_features = feats | {"utility": util}
         try:
-            _AUDIT.info(json.dumps({"stability_trace": {
+            payload = {
                 "run_id": self.run_id,
+                "objective": self.query_objective(),
                 "energy": round(energy, 4),
+                "setpoint": self.config.energy_setpoint,
                 "avg_score": round(avg_score, 4),
                 "used_tokens": used,
                 "max_tokens": max_tokens,
                 "failure_rate": round(failure_rate, 4),
+                "contradictions": contradictions,
+                "dial": round(dial, 4),
+                "dial_std": round(dial_std, 4),
+                "features": {k: round(v, 4) for k, v in feats.items()},
+                "auto_adjustments": auto_adj,
                 "unstable": unstable
-            }}, ensure_ascii=False))
+            }
+            _AUDIT.info(json.dumps({"stability_trace": payload}, ensure_ascii=False))
         except Exception:
             pass
         return not unstable
+
+# ---- Preset Objectives & Hybrid blending ----
+@dataclass(slots=True)
+class WeightedObjective:
+    name: str
+    weights: Dict[str, float]
+    def utility(self, *, used_tokens: int, max_tokens: int, avg_score: float,
+                failure_rate: float, contradictions: int, dial: float) -> float:
+        cost_inv = 1.0 - max(0.0, min(1.0, used_tokens / max(1, max_tokens)))
+        qual = max(0.0, min(1.0, avg_score))
+        reliability = max(0.0, min(1.0, 1.0 - failure_rate))
+        safe = max(0.0, min(1.0, 1.0 - (min(10, contradictions) / 5.0)))
+        sat01 = (max(-1.0, min(1.0, dial)) + 1.0) / 2.0
+        feats = {"cost_inv": cost_inv, "quality": qual, "reliability": reliability, "safety": safe, "satisfaction": sat01}
+        total = sum(self.weights.values()) or 0.0
+        if total <= 0:
+            return 0.5
+        return sum(self.weights.get(k, 0.0) * feats[k] for k in feats) / total
+    def goal_summary(self) -> str:
+        top = sorted(self.weights.items(), key=lambda kv: kv[1], reverse=True)[:3]
+        return "prioritize " + ", ".join(k for k, _ in top)
+
+@dataclass(slots=True)
+class BlendObjective:
+    name: str
+    components: List[Tuple[Objective, float]]
+    def utility(self, **kwargs: Any) -> float:
+        total = sum(w for _, w in self.components) or 1.0
+        return sum(w * obj.utility(**kwargs) for obj, w in self.components) / total
+    def goal_summary(self) -> str:
+        return "blend " + ", ".join(f"{obj.name}:{w:.2f}" for obj, w in self.components)
+    @property
+    def weights(self) -> Dict[str, float]:
+        return {obj.name: w for obj, w in self.components}
+
+@dataclass(slots=True)
+class BlendedObjective:
+    name: str = "hybrid"
+    market: WeightedObjective = field(default_factory=lambda: WeightedObjective("market", {"quality":0.45,"reliability":0.25,"cost_inv":0.2,"safety":0.08,"satisfaction":0.02}))
+    social: WeightedObjective = field(default_factory=lambda: WeightedObjective("social", {"safety":0.4,"reliability":0.25,"satisfaction":0.2,"quality":0.1,"cost_inv":0.05}))
+    def utility(self, **kwargs: Any) -> float:
+        return (self.market.utility(**kwargs) + self.social.utility(**kwargs)) / 2.0
+    def goal_summary(self) -> str:
+        return "balance safety, reliability, quality"
+
+class ObjectiveRegistry:
+    def __init__(self) -> None:
+        self._objs: Dict[str, Objective] = {}
+    def register(self, obj: Objective) -> None:
+        self._objs[getattr(obj, "name", type(obj).__name__).lower()] = obj
+    def get(self, name: str) -> Optional[Objective]:
+        return self._objs.get(name.lower())
+    def all(self) -> Dict[str, Objective]:
+        return dict(self._objs)
+
+OBJECTIVES = ObjectiveRegistry()
+OBJECTIVES.register(WeightedObjective("market", {"quality":0.45,"reliability":0.25,"cost_inv":0.2,"safety":0.08,"satisfaction":0.02}))
+OBJECTIVES.register(WeightedObjective("social", {"safety":0.4,"reliability":0.25,"satisfaction":0.2,"quality":0.1,"cost_inv":0.05}))
+OBJECTIVES.register(BlendedObjective())
+
+def _parse_weights_json(s: str) -> Optional[Dict[str, float]]:
+    try:
+        if s:
+            d = json.loads(s)
+            if isinstance(d, dict):
+                return {str(k): float(v) for k, v in d.items()}
+    except Exception:
+        pass
+    return None
+
+def _preset_objective(mode: str, override_json: Optional[str]) -> Objective:
+    w = _parse_weights_json(override_json or "")
+    if mode == "market":
+        return WeightedObjective("market", w or {"quality":0.45,"reliability":0.25,"cost_inv":0.2,"safety":0.08,"satisfaction":0.02})
+    if mode == "social":
+        return WeightedObjective("social", w or {"safety":0.4,"reliability":0.25,"satisfaction":0.2,"quality":0.1,"cost_inv":0.05})
+    # default hybrid
+    if w:  # custom direct weights override even in hybrid
+        return WeightedObjective("hybrid", w)
+    return BlendedObjective()
 
 class EchoSolver:
     """Trivial echo solver for demo and testing. Handles optional context."""
