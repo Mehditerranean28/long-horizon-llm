@@ -23,7 +23,7 @@ from typing import (
     TypedDict,
 )
 
-from .constants import (
+from constants import (
     A_TEMPLATES,
     CRITIC_SCHEMA,
     DEFAULT_A_CLUSTER,
@@ -77,7 +77,7 @@ try:
 except Exception:
     Draft7Validator = None
 
-from .kern.src.kern.core import init_logging
+from kern.src.kern.core import init_logging
 
 try:
     init_logging()

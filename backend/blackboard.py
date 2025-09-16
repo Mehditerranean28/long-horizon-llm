@@ -37,7 +37,7 @@ from typing import (
     runtime_checkable,
 )
 
-from .constants import (
+from constants import (
     PLANNER_PROMPT,
     CQAP_SECTION_PROMPT,
     TEMPLATE_REGISTRY,
@@ -84,7 +84,7 @@ from .constants import (
     MISSION_PLAN_SCHEMA_HINT,
 )
 
-from .kern.src.kern.core import init_logging
+from kern.src.kern.core import init_logging
 
 # Environment-driven defaults
 _GLOBAL_MAX_CONCURRENT = int(os.getenv("GLOBAL_MAX_CONCURRENT", "16"))
